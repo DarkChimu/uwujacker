@@ -1,0 +1,38 @@
+{
+    "name": "uwujacker",
+    "version": "1.0.1",
+    "description": "CLI para descargar episodios de anime desde JKAnime con soporte de slugs y descargas paralelas",
+    "main": "index.js",
+    "bin": {
+        "uwujacker": "./index.js"
+    },
+    "packageManager": "yarn@1.22.22",
+    "scripts": {
+        "start": "node index.js",
+        "download": "node index.js",
+        "test": "node --test",
+        "release:check": "yarn test",
+        "release:tag": "git tag v$(node -p \"require('./package.json').version\")",
+        "build:exe": "npx esbuild index.js --bundle --platform=node --target=node24 --outfile=dist/bundle.js && node --experimental-sea-config sea-config.json && node -e \"const fs=require('node:fs'); const path=require('node:path'); const target = process.platform === 'win32' ? 'uwujacker.exe' : 'uwujacker'; fs.mkdirSync('dist', { recursive: true }); fs.copyFileSync(process.execPath, path.join('dist', target)); const { execSync } = require('node:child_process'); execSync('npx postject@latest ' + JSON.stringify(path.join('dist', target)) + ' NODE_SEA_BLOB dist/sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2', { stdio: 'inherit', shell: true });\""
+    },
+    "keywords": [
+        "anime",
+        "downloader",
+        "cli",
+        "uwujacker"
+    ],
+    "license": "GPL-3.0-or-later",
+    "dependencies": {
+        "adm-zip": "^0.6.1",
+        "axios": "^1.7.7",
+        "cheerio": "^1.0.0-rc.12",
+        "cloudscraper": "^4.0.0",
+        "progress": "^2.0.1",
+        "request": "^2.88.2",
+        "yargs": "^17.0.1"
+    },
+    "devDependencies": {
+        "esbuild": "^0.28.2",
+        "postject": "^1.0.0-alpha.6"
+    }
+}
