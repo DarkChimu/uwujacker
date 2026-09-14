@@ -1,8 +1,8 @@
-const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
-const ProgressBar = require("progress");
-const { ensureDirectoryExists, formatBytes, validateDownloadedFile } = require("../utils/files");
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
+const { ensureDirectoryExists, formatBytes, validateDownloadedFile, buildEpisodeFileName } = require("../utils/files");
 const { makeRequest, extractPlayerUrlFromEpisodeHtml, extractMediaUrlFromPlayerHtml } = require("./jkanime");
 const { spawn } = require("child_process");
 
@@ -20,6 +20,21 @@ function moveCursorUp(lines) {
 
 function clearLine() {
   return "\x1b[2K\r";
+}
+
+// Single-file progress bar drawn with a carriage return, replacing the external
+// `progress` dependency. Matches the ASCII bar style of the parallel renderer.
+function renderSingleProgress(label, downloaded, total) {
+  if (!process.stdout || !process.stdout.isTTY || total <= 0) {
+    return;
+  }
+
+  const barWidth = 30;
+  const percent = Math.max(0, Math.min(100, (downloaded / total) * 100));
+  const filled = Math.round((percent / 100) * barWidth);
+  const bar = `[${"=".repeat(filled)}${" ".repeat(barWidth - filled)}]`;
+  const line = `${label} ${bar} ${Math.round(percent)}% (${formatBytes(downloaded)} / ${formatBytes(total)})`;
+  process.stdout.write(`${clearLine()}${line}`);
 }
 
 function renderProgressBlock(lines) {
@@ -132,87 +147,52 @@ async function downloadFile(url, filePath, options = {}) {
     return downloadHlsFile(url, filePath, { ffmpegPath, spawnFn, onProgress, verbose });
   }
 
-  const writerFn = downloadFn || ((targetUrl, targetPath, runtimeOptions = {}) => {
-    return new Promise(async (resolve, reject) => {
-      try {
-        ensureDirectoryExists(path.dirname(targetPath));
+  const writerFn = downloadFn || (async (targetUrl, targetPath) => {
+    ensureDirectoryExists(path.dirname(targetPath));
 
-        const response = await axios({
-          url: targetUrl,
-          method: "GET",
-          responseType: "stream",
-          validateStatus: (status) => status >= 200 && status < 400,
-        });
+    const response = await fetch(targetUrl, { redirect: "follow" });
+    if (!response.ok || !response.body) {
+      throw new Error(`La descarga de ${targetPath} falló con estado ${response.status}`);
+    }
 
-        const contentLength = Number.parseInt(response.headers["content-length"] || "0", 10);
+    const contentLength = Number.parseInt(response.headers.get("content-length") || "0", 10);
 
-        const showProgress = !verbose && Number.isFinite(contentLength) && contentLength > 0 && !onProgress;
-        const progressBar = showProgress
-          ? new ProgressBar(`Downloading ${path.basename(targetPath)} [:bar] :percent :etas`, {
-              width: 40,
-              complete: "=",
-              incomplete: " ",
-              renderThrottle: 1,
-              total: contentLength,
-            })
-          : null;
+    const showProgress = !verbose && Number.isFinite(contentLength) && contentLength > 0 && !onProgress;
 
-        if (!showProgress && !onProgress) {
-          console.log(`Descargando ${path.basename(targetPath)}${verbose ? " (verbose)" : ""}...`);
-        }
+    if (!showProgress && !onProgress) {
+      console.log(`Descargando ${path.basename(targetPath)}${verbose ? " (verbose)" : ""}...`);
+    }
 
-        const writer = fs.createWriteStream(targetPath, { flags: "w" });
-        let downloaded = 0;
+    // fetch's response.body is a web ReadableStream; convert to a Node stream so
+    // we can observe chunks (progress) and pipe to disk with backpressure.
+    const nodeStream = Readable.fromWeb(response.body);
+    const writer = fs.createWriteStream(targetPath, { flags: "w" });
+    const label = path.basename(targetPath);
+    let downloaded = 0;
 
-        response.data.on("data", (chunk) => {
-          downloaded += chunk.length;
-          if (progressBar) {
-            progressBar.tick(chunk.length);
-          }
-          if (onProgress) {
-            const percent = contentLength > 0 ? (downloaded / contentLength) * 100 : 0;
-            onProgress({
-              filePath: targetPath,
-              downloaded,
-              total: contentLength,
-              percent,
-            });
-          }
-        });
-
-        response.data.on("error", (error) => {
-          writer.destroy();
-          reject(error);
-        });
-
-        response.data.pipe(writer);
-
-        writer.on("finish", () => {
-          try {
-            const result = validateDownloadedFile(targetPath);
-            if (onProgress) {
-              onProgress({
-                filePath: targetPath,
-                downloaded: result.size,
-                total: result.size,
-                percent: 100,
-                final: true,
-              });
-            }
-            if (showProgress) {
-              console.log(`Archivo listo: ${result.filePath} (${formatBytes(result.size)})`);
-            }
-            resolve(result.filePath);
-          } catch (error) {
-            reject(error);
-          }
-        });
-
-        writer.on("error", reject);
-      } catch (error) {
-        reject(error);
+    nodeStream.on("data", (chunk) => {
+      downloaded += chunk.length;
+      if (showProgress) {
+        renderSingleProgress(label, downloaded, contentLength);
+      }
+      if (onProgress) {
+        const percent = contentLength > 0 ? (downloaded / contentLength) * 100 : 0;
+        onProgress({ filePath: targetPath, downloaded, total: contentLength, percent });
       }
     });
+
+    await pipeline(nodeStream, writer);
+
+    const result = validateDownloadedFile(targetPath);
+    if (onProgress) {
+      onProgress({ filePath: targetPath, downloaded: result.size, total: result.size, percent: 100, final: true });
+    }
+    if (showProgress) {
+      renderSingleProgress(label, result.size, result.size);
+      if (process.stdout.isTTY) process.stdout.write("\n");
+      console.log(`Archivo listo: ${result.filePath} (${formatBytes(result.size)})`);
+    }
+    return result.filePath;
   });
 
   return writerFn(url, filePath, { verbose, quality, retries, onProgress, ffmpegPath, spawnFn });
@@ -261,6 +241,15 @@ function downloadHlsFile(url, filePath, options = {}) {
     });
 
     child.on("error", (error) => {
+      // The most common failure is FFmpeg not being installed/on PATH. Turn the
+      // cryptic ENOENT into an actionable message instead of leaking it raw.
+      if (error && error.code === "ENOENT") {
+        reject(new Error(
+          `No se encontró FFmpeg ("${ffmpegPath}"). Los episodios en formato HLS (.m3u8) ` +
+          "requieren FFmpeg instalado y accesible en el PATH. Instálalo desde https://ffmpeg.org/download.html"
+        ));
+        return;
+      }
       reject(error);
     });
 
@@ -304,7 +293,7 @@ async function downloadEpisode({
     throw new Error("Anime and episode are required");
   }
 
-  const fileName = `${anime}-${episode}.mp4`;
+  const fileName = buildEpisodeFileName(anime, episode);
   const filePath = path.resolve(folder, fileName);
 
   if (skipExisting && !overwrite && shouldSkipExistingFile(filePath)) {
@@ -369,13 +358,14 @@ async function downloadEpisodesInParallel({
   const queue = [...episodes];
   const statusMap = new Map();
   const results = [];
+  const failures = [];
   let nextIndex = 0;
   let completed = 0;
   let successCount = 0;
   let errorCount = 0;
 
   for (const episode of queue) {
-    const filePath = path.resolve(folder, `${anime}-${episode}.mp4`);
+    const filePath = path.resolve(folder, buildEpisodeFileName(anime, episode));
     if (skipExisting && !overwrite && shouldSkipExistingFile(filePath)) {
       statusMap.set(String(episode), {
         episode: String(episode),
@@ -439,6 +429,9 @@ async function downloadEpisodesInParallel({
           verbose,
           overwrite,
           skipExisting,
+          // onProgress only reflects visual state. Counting happens once, below,
+          // when the episode promise settles — so completed/successCount stay
+          // deterministic regardless of whether onProgress ever fires.
           onProgress: ({ downloaded, total: totalSize, percent, final = false }) => {
             const item = statusMap.get(episodeKey) || {
               episode: episodeKey,
@@ -455,30 +448,24 @@ async function downloadEpisodesInParallel({
             item.percent = Number.isFinite(percent) ? percent : item.percent || 0;
             statusMap.set(episodeKey, item);
             renderStatus();
-
-            if (final) {
-              completed += 1;
-              successCount += 1;
-            }
           },
         });
 
-        if (!statusMap.has(episodeKey) || statusMap.get(episodeKey).status !== "done") {
-          statusMap.set(episodeKey, {
-            episode: episodeKey,
-            name: `Episodio ${episode}`,
-            status: "done",
-            percent: 100,
-            downloaded: 0,
-            total: 0,
-          });
-          completed += 1;
-          successCount += 1;
-          renderStatus();
-        }
-
+        statusMap.set(episodeKey, {
+          episode: episodeKey,
+          name: `Episodio ${episode}`,
+          status: "done",
+          percent: 100,
+          downloaded: 0,
+          total: 0,
+        });
+        completed += 1;
+        successCount += 1;
         results.push(filePath);
+        renderStatus();
       } catch (error) {
+        // A single failing episode must not abort the rest of the batch. Record
+        // it, keep going, and surface the failures in the final summary.
         statusMap.set(episodeKey, {
           episode: episodeKey,
           name: `Episodio ${episode}`,
@@ -487,9 +474,13 @@ async function downloadEpisodesInParallel({
           downloaded: 0,
           total: 0,
         });
+        completed += 1;
         errorCount += 1;
+        failures.push({ episode: episodeKey, error: error.message || String(error) });
+        if (verbose) {
+          console.warn(`Episodio ${episode} falló: ${error.message || error}`);
+        }
         renderStatus();
-        throw error;
       }
     }
   };
@@ -503,6 +494,9 @@ async function downloadEpisodesInParallel({
     `  OK: ${String(successCount).padStart(2, "0")}`,
     `  ERR: ${String(errorCount).padStart(2, "0")}`,
     `  Ruta: ${folder}`,
+    ...(failures.length
+      ? ["  Episodios fallidos:", ...failures.map((f) => `    ${f.episode}: ${f.error}`)]
+      : []),
   ];
 
   if (process.stdout.isTTY) {

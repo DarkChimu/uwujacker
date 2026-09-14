@@ -1,11 +1,28 @@
 const fs = require("fs");
 const path = require("path");
-const AdmZip = require("adm-zip");
 
+// Turns arbitrary user input (anime name/slug, episode label) into a safe path
+// segment. This is a trust boundary: the result is concatenated into a file
+// path, so it must never allow traversal (`..`), path separators, or a leading
+// dash that CLIs may parse as a flag.
 function sanitizeFilename(value) {
-  return String(value || "anime")
+  const cleaned = String(value || "anime")
+    // Strip Windows-illegal chars and path separators (forward + back slash).
     .replace(/[\\/:*?"<>|]/g, "")
+    // Collapse any run of dots so "..", "..." etc. cannot form traversal.
+    .replace(/\.{2,}/g, ".")
+    // Drop leading/trailing dots, dashes and whitespace.
+    .replace(/^[.\-\s]+|[.\-\s]+$/g, "")
     .trim();
+
+  return cleaned || "anime";
+}
+
+// Builds the on-disk file name for an episode from untrusted parts. Both the
+// anime slug and the episode label are sanitized so neither can escape the
+// target folder.
+function buildEpisodeFileName(anime, episode) {
+  return `${sanitizeFilename(anime)}-${sanitizeFilename(episode)}.mp4`;
 }
 
 function parseJsonSafe(body) {
@@ -59,31 +76,11 @@ function validateDownloadedFile(filePath, minSize = 1) {
   };
 }
 
-async function createZipArchive(filePaths, targetZipPath) {
-  if (!Array.isArray(filePaths) || !filePaths.length) {
-    return null;
-  }
-
-  ensureDirectoryExists(path.dirname(targetZipPath));
-  const zip = new AdmZip();
-
-  for (const filePath of filePaths) {
-    if (!filePath || !fs.existsSync(filePath)) {
-      continue;
-    }
-
-    zip.addLocalFile(filePath, "", path.basename(filePath));
-  }
-
-  zip.writeZip(targetZipPath);
-  return targetZipPath;
-}
-
 module.exports = {
   sanitizeFilename,
+  buildEpisodeFileName,
   parseJsonSafe,
   ensureDirectoryExists,
   formatBytes,
   validateDownloadedFile,
-  createZipArchive,
 };

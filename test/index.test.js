@@ -1,7 +1,12 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const test = require("node:test");
+const { test, after } = require("node:test");
 const assert = require("node:assert/strict");
+
+// Los tests escriben artefactos en ./tmp; los limpiamos al terminar la suite.
+after(() => {
+  fs.rmSync(path.resolve("./tmp"), { recursive: true, force: true });
+});
 
 const {
   parseArgs,
@@ -20,6 +25,7 @@ const {
   resolveAnimeSlug,
 } = require("../index.js");
 const { renderParallelStatus, downloadFile } = require("../src/services/downloader");
+const { buildEpisodeFileName } = require("../src/utils/files");
 
 test("parseArgs lee anime, episodio y carpeta", () => {
   const parsed = parseArgs(["--anime", "dr-stone", "--episode", "5", "--folder", "./animes/drstone"]);
@@ -32,6 +38,23 @@ test("parseArgs lee anime, episodio y carpeta", () => {
 test("sanitizeFilename elimina caracteres no válidos para un nombre de archivo", () => {
   assert.equal(sanitizeFilename("Dr. Stone"), "Dr. Stone");
   assert.equal(sanitizeFilename("Dr/Stone:?*"), "DrStone");
+});
+
+test("sanitizeFilename neutraliza intentos de path traversal", () => {
+  // Sin separadores, sin '..', sin guion inicial que un CLI trate como flag.
+  assert.equal(sanitizeFilename("../../etc/passwd"), "etcpasswd");
+  assert.equal(sanitizeFilename("..\\..\\windows"), "windows");
+  assert.equal(sanitizeFilename("-rf"), "rf");
+  assert.equal(sanitizeFilename(".."), "anime");
+  assert.equal(sanitizeFilename(""), "anime");
+});
+
+test("buildEpisodeFileName produce un nombre seguro dentro de la carpeta", () => {
+  assert.equal(buildEpisodeFileName("dr-stone", "5"), "dr-stone-5.mp4");
+  const malicious = buildEpisodeFileName("../../evil", "1");
+  assert.ok(!malicious.includes("/"), "no debe contener separadores de ruta");
+  assert.ok(!malicious.includes(".."), "no debe contener '..'");
+  assert.equal(malicious, "evil-1.mp4");
 });
 
 test("extractAnimeIdFromHtml obtiene el id del anime", () => {
@@ -224,6 +247,29 @@ test("downloadEpisodesInParallel respeta el límite de concurrencia", async () =
   assert.equal(maxActive, 2);
 });
 
+test("downloadEpisodesInParallel no aborta el lote si un episodio falla", async () => {
+  const attempted = [];
+
+  const result = await downloadEpisodesInParallel({
+    anime: "dr-stone",
+    episodes: ["1", "2", "3", "4"],
+    folder: "./tmp",
+    concurrency: 1,
+    downloadEpisodeFn: async ({ episode }) => {
+      attempted.push(episode);
+      if (episode === "2") {
+        throw new Error("fallo simulado en el episodio 2");
+      }
+      return `dr-stone-${episode}.mp4`;
+    },
+  });
+
+  // El fallo del episodio 2 no debe impedir que se intenten los 4 ni que se
+  // descarguen los 3 restantes; la promesa se resuelve, no rechaza.
+  assert.deepEqual(attempted, ["1", "2", "3", "4"]);
+  assert.deepEqual(result, ["dr-stone-1.mp4", "dr-stone-3.mp4", "dr-stone-4.mp4"]);
+});
+
 test("searchAnimeByQuery realiza una búsqueda AJAX y obtiene resultados", async () => {
   const requestFn = async (url) => {
     if (url.includes("ajax_search")) {
@@ -375,4 +421,50 @@ test("downloadFile usa ffmpeg para streams HLS y no guarda el manifiesto como vi
   assert.equal(calls[0].command, "ffmpeg");
   assert.ok(calls[0].args.includes("-i"));
   assert.ok(calls[0].args.includes("https://example.com/video.m3u8"));
+});
+
+test("downloadFile da un mensaje claro cuando falta FFmpeg (ENOENT)", async () => {
+  const spawnFn = () => {
+    const stream = new (require("node:events").EventEmitter)();
+    stream.stderr = new (require("node:events").EventEmitter)();
+    setImmediate(() => {
+      const err = new Error("spawn ffmpeg ENOENT");
+      err.code = "ENOENT";
+      stream.emit("error", err);
+    });
+    return stream;
+  };
+
+  await assert.rejects(
+    () => downloadFile("https://example.com/video.m3u8", path.resolve("./tmp/no-ffmpeg.mp4"), { spawnFn }),
+    /No se encontró FFmpeg/
+  );
+});
+
+test("downloadFile descarga por HTTP con fetch nativo y escribe el archivo", async () => {
+  const http = require("node:http");
+  const payload = Buffer.from("contenido-de-video-de-prueba");
+
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": String(payload.length) });
+    res.end(payload);
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  const target = path.resolve("./tmp/fetch-download.mp4");
+
+  try {
+    const progress = [];
+    const result = await downloadFile(`http://127.0.0.1:${port}/video.mp4`, target, {
+      onProgress: (p) => progress.push(p),
+    });
+
+    assert.equal(result, target);
+    assert.equal(fs.readFileSync(target, "utf8"), payload.toString());
+    // Debe emitir al menos el evento final con percent 100.
+    assert.ok(progress.some((p) => p.final === true && p.percent === 100));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

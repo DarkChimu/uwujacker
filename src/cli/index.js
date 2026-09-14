@@ -1,74 +1,10 @@
 #!/usr/bin/env node
 
 const path = require("path");
-const { hideBin } = require("yargs/helpers");
-const yargs = require("yargs/yargs");
 const { downloadEpisode, downloadEpisodesInParallel } = require("../services/downloader");
 const { resolveAnimeSlug, resolveEpisodePlan } = require("../services/jkanime");
 const { ensureDirectoryExists } = require("../utils/files");
-
-function parseArgs(argv = process.argv) {
-  const parser = yargs(hideBin(argv))
-    .usage("Uso: uwujacker -a <anime> -e <episode> -f <folder>")
-    .example([
-      ["uwujacker -a dr-stone -e 1 -f ./animes/drstone", "Descarga un episodio concreto"],
-      ["uwujacker -a dr-stone -e all -f ./animes/drstone", "Descarga todos los episodios disponibles"],
-      ["uwujacker -a dr-stone -e 3-6", "Descarga un rango de episodios"],
-      ["uwujacker --search \"Dragon Ball\" -e 1 -f animes", "Busca el slug correcto y descarga el episodio 1"],
-    ])
-    .option("anime", {
-      alias: "a",
-      type: "string",
-      describe: "Nombre o slug del anime",
-    })
-    .option("range", {
-      alias: "r",
-      type: "string",
-      default: "",
-      describe: "Rango de episodios, por ejemplo 3-6 o 1,3,5",
-    })
-    .option("episode", {
-      alias: "e",
-      type: "string",
-      default: "1",
-      describe: "Número del episodio o 'all'",
-    })
-    .option("folder", {
-      alias: "f",
-      type: "string",
-      describe: "Carpeta donde se guardarán los archivos. Si no se indica, usa ./animes/<slug>",
-    })
-    .option("concurrency", {
-      alias: "c",
-      type: "number",
-      default: 5,
-      describe: "Número máximo de descargas paralelas",
-    })
-    .option("overwrite", {
-      type: "boolean",
-      default: false,
-      describe: "Sobrescribe archivos existentes",
-    })
-    .option("skip-existing", {
-      type: "boolean",
-      default: true,
-      describe: "No vuelve a descargar archivos ya existentes",
-    })
-    .option("search", {
-      type: "string",
-      default: "",
-      describe: "Busca el slug correcto en JKAnime antes de descargar",
-    })
-    .option("verbose", {
-      alias: "v",
-      type: "boolean",
-      default: false,
-      describe: "Muestra más información de depuración",
-    })
-    .help();
-
-  return parser.parse();
-}
+const { parseArgv } = require("./args");
 
 function parseEpisodeSelection(value) {
   if (!value || value === "all") {
@@ -104,7 +40,7 @@ function parseEpisodeSelection(value) {
 }
 
 async function cli(argv = process.argv) {
-  const args = parseArgs(argv);
+  const args = parseArgv(argv);
   const animeQuery = args.anime || args._?.[0] || "";
 
   if (!animeQuery && !args.search) {
@@ -153,7 +89,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  parseArgs,
   cli,
   parseEpisodeSelection,
 };

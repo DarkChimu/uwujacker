@@ -1,5 +1,5 @@
-const axios = require("axios");
 const cheerio = require("cheerio");
+const { parseJsonSafe } = require("../utils/files");
 
 const DEFAULT_BASE_URL = "https://jkanime.net";
 
@@ -28,20 +28,24 @@ async function makeRequest(url, options = {}) {
 
   while (attempt <= retries) {
     try {
-      const response = await axios({
-        url,
+      // fetch has no built-in timeout: AbortSignal.timeout aborts the request
+      // after `timeout` ms. It also does NOT reject on 4xx/5xx, so we honor the
+      // caller's validateStatus explicitly, mirroring axios' behavior.
+      const response = await fetch(url, {
         method,
         headers,
-        data: body,
-        timeout,
-        validateStatus,
-        responseType: "text",
+        body,
+        signal: AbortSignal.timeout(timeout),
       });
+
+      if (!validateStatus(response.status)) {
+        throw new Error(`Petición a ${url} devolvió estado ${response.status}`);
+      }
 
       return {
         status: response.status,
-        body: response.data,
-        headers: response.headers,
+        body: await response.text(),
+        headers: Object.fromEntries(response.headers.entries()),
       };
     } catch (error) {
       if (attempt >= retries) {
@@ -190,24 +194,37 @@ function extractMediaUrlFromPlayerHtml(html) {
   return null;
 }
 
-async function searchAnimeByQuery(query, baseUrl = DEFAULT_BASE_URL) {
+async function searchAnimeByQuery(query, options = {}) {
+  const {
+    baseUrl = DEFAULT_BASE_URL,
+    requestFn = makeRequest,
+    homeRequestFn = null,
+  } = options;
+
   const safeQuery = (query || "").trim();
   if (!safeQuery) {
-    throw new Error("La búsqueda por anime requiere una consulta");
+    return [];
   }
 
-  const pageUrl = `${baseUrl}/`;
-  const page = await makeRequest(pageUrl);
-  const tokenMatch = page.body.match(/name=["']_token["']\s+value=["']([^"']+)["']/i) ||
-    page.body.match(/_token[^\n]*value=["']([^"']+)["']/i);
+  // Obtain the CSRF token from the home page; JKAnime requires it on ajax_search.
+  // If the home page cannot be fetched we still attempt the search with an empty
+  // token rather than aborting: the AJAX endpoint is the source of truth.
+  const homeFn = homeRequestFn || (() => requestFn(`${baseUrl}/`));
+  let homePage;
+  try {
+    homePage = await homeFn();
+  } catch (error) {
+    homePage = { body: "" };
+  }
+
+  const homeBody = homePage?.body || "";
+  const tokenMatch = homeBody.match(/name=["']_token["']\s+value=["']([^"']+)["']/i) ||
+    homeBody.match(/_token[^\n]*value=["']([^"']+)["']/i);
   const csrfToken = tokenMatch ? tokenMatch[1] : "";
 
-  const payload = new URLSearchParams({
-    _token: csrfToken,
-    q: safeQuery,
-  });
+  const payload = new URLSearchParams({ _token: csrfToken, q: safeQuery });
 
-  const searchResponse = await makeRequest(`${baseUrl}/ajax_search`, {
+  const searchResponse = await requestFn(`${baseUrl}/ajax_search`, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
@@ -218,36 +235,21 @@ async function searchAnimeByQuery(query, baseUrl = DEFAULT_BASE_URL) {
     validateStatus: (status) => status >= 200 && status < 500,
   });
 
-  if (!searchResponse.body) {
-    return [];
-  }
+  const responseData = parseJsonSafe(searchResponse?.body) ?? [];
+  const list = Array.isArray(responseData)
+    ? responseData
+    : Array.isArray(responseData.data)
+      ? responseData.data
+      : [];
 
-  let results = [];
-
-  try {
-    results = JSON.parse(searchResponse.body);
-  } catch (error) {
-    const cleaned = searchResponse.body.trim();
-    if (cleaned) {
-      try {
-        results = JSON.parse(cleaned);
-      } catch {
-        return [];
-      }
-    }
-  }
-
-  if (!Array.isArray(results)) {
-    return [];
-  }
-
-  return results
+  return list
     .map((item) => {
       if (item && typeof item === "object") {
         const slug = item.slug || item.attributes?.slug || item.url?.replace(/^\//, "").split("/")[0] || "";
         const title = item.title || item.name || item.attributes?.title || item.attributes?.name || "";
         if (!slug) return null;
         return {
+          id: item.id ?? item.attributes?.id ?? null,
           slug: normalizeSlug(slug),
           title: title || slug,
           raw: item,
@@ -255,11 +257,7 @@ async function searchAnimeByQuery(query, baseUrl = DEFAULT_BASE_URL) {
       }
 
       if (typeof item === "string") {
-        return {
-          slug: normalizeSlug(item),
-          title: item,
-          raw: item,
-        };
+        return { id: null, slug: normalizeSlug(item), title: item, raw: item };
       }
 
       return null;
@@ -268,14 +266,46 @@ async function searchAnimeByQuery(query, baseUrl = DEFAULT_BASE_URL) {
 }
 
 async function resolveAnimeSlug(query, options = {}) {
-  const { baseUrl = DEFAULT_BASE_URL, searchFn = searchAnimeByQuery } = options;
-  const results = await searchFn(query, baseUrl);
+  const { searchFn = searchAnimeByQuery } = options;
+  const results = await searchFn(query, options);
 
   if (!results.length) {
-    return normalizeSlug(query);
+    return normalizeSlug(query || "");
   }
 
-  return results[0].slug || normalizeSlug(query);
+  return results[0].slug || normalizeSlug(query || "");
+}
+
+function extractAnimeIdFromHtml(html) {
+  if (!html || typeof html !== "string") return null;
+  const match = html.match(/id=["']guardar-anime["'][^>]*data-anime=["']([^"']+)["']/i);
+  return match ? match[1] : null;
+}
+
+function extractEpisodeIdFromHtml(html) {
+  if (!html || typeof html !== "string") return null;
+  const match = html.match(/id=["']guardar-capitulo["'][^>]*data-capitulo=["']([^"']+)["']/i);
+  return match ? match[1] : null;
+}
+
+function extractLastChapterFromJson(body) {
+  const data = parseJsonSafe(body);
+  if (!data) return 1;
+  const list = Array.isArray(data) ? data : Array.isArray(data.data) ? data.data : [];
+  const last = list
+    .map((entry) => Number.parseInt(entry?.number ?? entry?.episode ?? entry?.id ?? entry?.attributes?.number ?? "0", 10))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .sort((left, right) => left - right)
+    .pop();
+  return last || 1;
+}
+
+function extractLastChapterFromHtml(html) {
+  if (!html || typeof html !== "string") return 1;
+  const regex = /(?:episodios|episodes|capítulos|chapters|episodio)\s*[:=]?\s*(\d+)/i;
+  const match = html.match(regex) || html.match(/(\d+)\s*<\/?\w+[^>]*>\s*$/i);
+  const value = match ? Number.parseInt(match[1], 10) : NaN;
+  return Number.isFinite(value) && value > 0 ? value : 1;
 }
 
 async function resolveEpisodePlan({ animeSlug, baseUrl = DEFAULT_BASE_URL, requestFn = makeRequest } = {}) {
@@ -310,6 +340,10 @@ module.exports = {
   makeRequest,
   extractPlayerUrlFromEpisodeHtml,
   extractMediaUrlFromPlayerHtml,
+  extractAnimeIdFromHtml,
+  extractEpisodeIdFromHtml,
+  extractLastChapterFromJson,
+  extractLastChapterFromHtml,
   searchAnimeByQuery,
   resolveAnimeSlug,
   resolveEpisodePlan,

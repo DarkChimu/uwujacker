@@ -1,96 +1,94 @@
 const yargs = require("yargs/yargs");
 const { hideBin } = require("yargs/helpers");
 
-function parseArgs(rawArgv = hideBin(process.argv)) {
-  const parsed = yargs(rawArgv)
+// Single source of truth for CLI options. Both the executable entry (index.js)
+// and the orchestration layer (src/cli/index.js) use this parser so the flags
+// that are documented, parsed, and actually honored never drift apart.
+function buildParser(argv) {
+  return yargs(argv)
+    .usage("Uso: uwujacker -a <anime> -e <episode> -f <folder>")
+    .example([
+      ["uwujacker -a dr-stone -e 1 -f ./animes/drstone", "Descarga un episodio concreto"],
+      ["uwujacker -a dr-stone -e all -f ./animes/drstone", "Descarga todos los episodios disponibles"],
+      ["uwujacker -a dr-stone -e 3-6", "Descarga un rango de episodios"],
+      ["uwujacker --search \"Dragon Ball\" -e 1 -f animes", "Busca el slug correcto y descarga el episodio 1"],
+    ])
     .option("anime", {
       alias: "a",
-      describe: "Name of the anime to download",
       type: "string",
+      describe: "Nombre o slug del anime",
     })
     .option("episode", {
       alias: "e",
-      describe: "Number of the episode to download or 'all'",
       type: "string",
+      default: "1",
+      describe: "Número del episodio, un rango como 3-6, una lista 1,3,5 o 'all'",
+    })
+    .option("range", {
+      alias: "r",
+      type: "string",
+      default: "",
+      describe: "Rango o lista de episodios, por ejemplo 3-6 o 1,3,5",
     })
     .option("folder", {
       alias: "f",
-      describe: "Folder to save the downloaded anime",
       type: "string",
-      default: ".",
+      describe: "Carpeta destino. Si no se indica, usa ./animes/<slug>",
     })
-    .option("server", {
-      alias: "s",
-      describe: "Preferred player/server: jk, um, all (default: jk)",
-      type: "string",
-      default: "jk",
-    })
-    .option("quality", {
-      alias: "q",
-      describe: "Preferred quality label if the site exposes it",
-      type: "string",
-    })
-    .option("zip", {
-      type: "boolean",
-      default: false,
-      describe: "Create a ZIP archive with all downloaded episodes",
-    })
-    .option("retries", {
+    .option("concurrency", {
+      alias: "c",
       type: "number",
-      default: 2,
-      describe: "How many times to retry a request/download after failure",
+      default: 5,
+      describe: "Número máximo de descargas paralelas",
     })
     .option("overwrite", {
       type: "boolean",
       default: false,
-      describe: "Re-descarga archivos aunque ya existan en la carpeta",
-    })
-    .option("verbose", {
-      type: "boolean",
-      default: false,
-      describe: "Muestra más logs, incluyendo progreso por archivo",
+      describe: "Re-descarga archivos aunque ya existan",
     })
     .option("skip-existing", {
       type: "boolean",
       default: true,
-      describe: "No vuelve a descargar episodios que ya estén en disco",
-    })
-    .option("concurrency", {
-      alias: "c",
-      describe: "Máximo de descargas simultáneas cuando se usa -e all",
-      type: "number",
-      default: 5,
+      describe: "No vuelve a descargar archivos ya existentes",
     })
     .option("search", {
-      alias: "S",
-      describe: "Busca un anime por nombre y resuelve el slug correcto antes de descargar",
       type: "string",
+      default: "",
+      describe: "Busca el slug correcto en JKAnime antes de descargar",
     })
-    .check((argv) => {
-      if (!argv.anime && !argv._[0]) {
-        throw new Error("Anime name is required");
-      }
-      return true;
+    .option("verbose", {
+      alias: "v",
+      type: "boolean",
+      default: false,
+      describe: "Muestra más información de depuración",
     })
     .help()
     .alias("help", "h")
-    .version(false)
-    .parse();
+    .version(false);
+}
+
+// Returns the raw yargs parse result. Used by the orchestration layer, which
+// needs access to argv._ and the hyphenated keys (e.g. args["skip-existing"]).
+function parseArgv(argv = process.argv) {
+  return buildParser(hideBin(argv)).parse();
+}
+
+// Returns a normalized, flat options object. Used by tests and any caller that
+// wants the resolved values without yargs bookkeeping.
+function parseArgs(rawArgv = hideBin(process.argv)) {
+  const parsed = buildParser(rawArgv).parse();
 
   return {
-    anime: parsed.anime || parsed._[0],
-    episode: parsed.episode,
-    folder: parsed.folder || ".",
-    server: parsed.server || "jk",
-    quality: parsed.quality || null,
-    zip: Boolean(parsed.zip),
-    retries: Number(parsed.retries) || 2,
+    anime: parsed.anime || parsed._[0] || "",
+    episode: parsed.episode || "1",
+    range: parsed.range || "",
+    folder: parsed.folder || null,
     verbose: Boolean(parsed.verbose),
     overwrite: Boolean(parsed.overwrite),
-    skipExisting: parsed.skipExisting !== undefined ? Boolean(parsed.skipExisting) : !Boolean(parsed.overwrite),
+    skipExisting: parsed["skip-existing"] !== undefined ? Boolean(parsed["skip-existing"]) : !parsed.overwrite,
     concurrency: Math.max(1, Number(parsed.concurrency) || 5),
-    search: parsed.search || null,
+    search: parsed.search || "",
   };
 }
 
-module.exports = { parseArgs };
+module.exports = { buildParser, parseArgv, parseArgs };
