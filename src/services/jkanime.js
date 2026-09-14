@@ -81,29 +81,41 @@ function resolveAbsoluteUrl(candidate, baseUrl = DEFAULT_BASE_URL) {
   return `${baseUrl.replace(/\/$/, "")}/${normalized.replace(/^\//, "")}`;
 }
 
+function normalizeVideoCandidate(candidate) {
+  if (!candidate) return null;
+  const trimmed = String(candidate).trim().replace(/[),;]+$/, "");
+  return trimmed || null;
+}
+
 function extractPlayerUrlFromEpisodeHtml(html, server = "jk") {
   if (!html || typeof html !== "string") return null;
 
-  const patterns = [
-    /jkplayer\/jk\?u=([^"'\s<>]+)/i,
-    /src=["']([^"']*jkplayer[^"']+)["']/i,
-    /var\s+video\s*=\s*\[[\s\S]*?https?:\/\/[^\]]+/i,
-    /<iframe[^>]+src=["']([^"']+)["'][^>]*>/i,
-  ];
+  const modernPattern = /https?:\/\/[^"'\s<>]*\/jkplayer\/(?:um|umv|c1)[^"'\s<>]*/i;
+  const legacyPattern = /https?:\/\/[^"'\s<>]*\/jkplayer\/jk\?u=[^"'\s<>]*/i;
+  const relativePattern = /(?:\/)?jkplayer\/(?:um|umv|c1|jk)(?:\?[^"'\s<>]+|\/[^"'\s<>]+)?/i;
+  const iframePattern = /<iframe[^>]+src=["']([^"']+)["'][^>]*>/i;
 
-  for (const pattern of patterns) {
-    const match = html.match(pattern);
-    if (match) {
-      const raw = match[1] || match[0];
-      if (pattern.source.includes("jkplayer\\/jk\\?u=")) {
-        const value = match[1];
-        return resolveAbsoluteUrl(`jkplayer/jk?u=${value}`, DEFAULT_BASE_URL);
-      }
+  const candidates = [];
 
-      const candidate = resolveAbsoluteUrl(raw, DEFAULT_BASE_URL);
-      if ((candidate && candidate.includes("jkplayer")) || candidate.includes("stream")) {
-        return candidate;
-      }
+  const modernMatch = html.match(modernPattern) || html.match(relativePattern);
+  if (modernMatch) candidates.push(modernMatch[0]);
+
+  const legacyMatch = html.match(legacyPattern) || html.match(/(?:\/)?jkplayer\/jk\?u=[^"'\s<>]*/i);
+  if (legacyMatch) candidates.push(legacyMatch[0]);
+
+  const iframeMatch = html.match(iframePattern);
+  if (iframeMatch) candidates.push(iframeMatch[1]);
+
+  const srcMatch = html.match(/src=["']([^"']*jkplayer[^"']+)["']/i);
+  if (srcMatch) candidates.push(srcMatch[1]);
+
+  for (const candidate of candidates) {
+    const normalized = normalizeVideoCandidate(candidate);
+    if (!normalized) continue;
+
+    const resolved = resolveAbsoluteUrl(normalized, DEFAULT_BASE_URL);
+    if (resolved && /jkplayer\/(?:um|umv|c1|jk)/i.test(resolved)) {
+      return resolved;
     }
   }
 
@@ -120,8 +132,11 @@ function extractPlayerUrlFromEpisodeHtml(html, server = "jk") {
   });
 
   for (const script of scriptCandidates) {
-    const match = script.match(/(?:https?:\/\/[^"'\s]+(?:stream|jkplayer)[^"'\s]*)|(?:\/?jkplayer\/jk\?u=[^"'\s]+)/i);
-    if (match) return resolveAbsoluteUrl(match[0], DEFAULT_BASE_URL);
+    const match = script.match(/(?:https?:\/\/[^"'\s<>]+(?:stream|jkplayer)[^"'\s<>]*)|(?:\/jkplayer\/(?:um|umv|c1|jk)[^"'\s<>]*)/i);
+    if (match) {
+      const resolved = resolveAbsoluteUrl(match[0], DEFAULT_BASE_URL);
+      if (resolved && resolved.includes("jkplayer")) return resolved;
+    }
   }
 
   return null;
@@ -133,6 +148,7 @@ function extractMediaUrlFromPlayerHtml(html) {
   const patterns = [
     /https?:\/\/[^"'\s<>]+\.(?:m3u8|mp4|mkv|webm)(?:\?[^"'\s<>]*)?/i,
     /"(?:file|src|url)"\s*:\s*"([^"']+)"/i,
+    /'(?:file|src|url)'\s*:\s*'([^']+)'/i,
     /source\s*src=["']([^"']+)["']/i,
     /video\s*:\s*\{[^}]*src\s*:\s*["']([^"']+)["']/i,
     /https?:\/\/jkplayers\.com\/stream\/[^"'\s<>]+/i,
@@ -142,11 +158,11 @@ function extractMediaUrlFromPlayerHtml(html) {
   for (const pattern of patterns) {
     const match = html.match(pattern);
     if (match) {
-      const candidate = match[1] || match[0];
+      const candidate = normalizeVideoCandidate(match[1] || match[0]);
       if (candidate && /\.(m3u8|mp4|mkv|webm)(\?.*)?$/i.test(candidate)) {
         return candidate;
       }
-      return candidate;
+      if (candidate) return candidate;
     }
   }
 
@@ -159,15 +175,16 @@ function extractMediaUrlFromPlayerHtml(html) {
   ].filter(Boolean);
 
   for (const candidate of urlCandidates) {
-    if (/\.(m3u8|mp4|mkv|webm)/i.test(candidate)) {
-      return candidate;
+    const normalized = normalizeVideoCandidate(candidate);
+    if (normalized && /\.(m3u8|mp4|mkv|webm)(\?.*)?$/i.test(normalized)) {
+      return normalized;
     }
   }
 
   const scriptRegex = /https?:\/\/[^"'\s<>]+(?:m3u8|mp4|mkv|webm)[^"'\s<>]*/gi;
   const scriptMatches = html.match(scriptRegex);
   if (scriptMatches && scriptMatches.length) {
-    return scriptMatches[0];
+    return normalizeVideoCandidate(scriptMatches[0]);
   }
 
   return null;

@@ -4,6 +4,7 @@ const path = require("path");
 const ProgressBar = require("progress");
 const { ensureDirectoryExists, formatBytes, validateDownloadedFile } = require("../utils/files");
 const { makeRequest, extractPlayerUrlFromEpisodeHtml, extractMediaUrlFromPlayerHtml } = require("./jkanime");
+const { spawn } = require("child_process");
 
 function canUseAnsiProgress() {
   if (!process.stdout || !process.stdout.isTTY || process.env.TERM === "dumb") {
@@ -125,7 +126,11 @@ function shouldSkipExistingFile(filePath) {
 }
 
 async function downloadFile(url, filePath, options = {}) {
-  const { downloadFn = null, verbose = false, quality = null, retries = 0, onProgress = null } = options;
+  const { downloadFn = null, verbose = false, quality = null, retries = 0, onProgress = null, ffmpegPath = "ffmpeg", spawnFn = spawn } = options;
+
+  if (isHlsUrl(url)) {
+    return downloadHlsFile(url, filePath, { ffmpegPath, spawnFn, onProgress, verbose });
+  }
 
   const writerFn = downloadFn || ((targetUrl, targetPath, runtimeOptions = {}) => {
     return new Promise(async (resolve, reject) => {
@@ -210,7 +215,75 @@ async function downloadFile(url, filePath, options = {}) {
     });
   });
 
-  return writerFn(url, filePath, { verbose, quality, retries, onProgress });
+  return writerFn(url, filePath, { verbose, quality, retries, onProgress, ffmpegPath, spawnFn });
+}
+
+function isHlsUrl(url) {
+  return /\.m3u8(?:\?|$)/i.test(String(url || ""));
+}
+
+function downloadHlsFile(url, filePath, options = {}) {
+  const {
+    ffmpegPath = "ffmpeg",
+    spawnFn = spawn,
+    onProgress = null,
+    verbose = false,
+  } = options;
+
+  return new Promise((resolve, reject) => {
+    ensureDirectoryExists(path.dirname(filePath));
+
+    const args = [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-y",
+      "-i",
+      url,
+      "-c",
+      "copy",
+      "-movflags",
+      "+faststart",
+      filePath,
+    ];
+
+    const child = spawnFn(ffmpegPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+      if (onProgress) {
+        const match = /time=(\d+:\d+:\d+\.\d+)/.exec(stderr);
+        if (match) {
+          onProgress({ filePath, downloaded: 0, total: 0, percent: 0, final: false, raw: match[1] });
+        }
+      }
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`FFmpeg falló al procesar el stream HLS: ${stderr.trim() || "sin detalle"}`));
+        return;
+      }
+
+      try {
+        const result = validateDownloadedFile(filePath);
+        if (onProgress) {
+          onProgress({ filePath, downloaded: result.size, total: result.size, percent: 100, final: true });
+        }
+        if (!verbose) {
+          console.log(`Archivo listo: ${result.filePath} (${formatBytes(result.size)})`);
+        }
+        resolve(result.filePath);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
 }
 
 async function downloadEpisode({

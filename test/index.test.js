@@ -19,7 +19,7 @@ const {
   searchAnimeByQuery,
   resolveAnimeSlug,
 } = require("../index.js");
-const { renderParallelStatus } = require("../src/services/downloader");
+const { renderParallelStatus, downloadFile } = require("../src/services/downloader");
 
 test("parseArgs lee anime, episodio y carpeta", () => {
   const parsed = parseArgs(["--anime", "dr-stone", "--episode", "5", "--folder", "./animes/drstone"]);
@@ -65,7 +65,18 @@ test("extractPlayerUrlFromEpisodeHtml prioriza el player principal de JKAnime", 
 
   assert.equal(
     extractPlayerUrlFromEpisodeHtml(html),
-    "https://jkanime.net/jkplayer/jk?u=stream/jkmedia/demo/"
+    "https://jkanime.net/jkplayer/um?e=foo"
+  );
+});
+
+test("extractPlayerUrlFromEpisodeHtml soporta rutas modernas del player JKAnime", () => {
+  const html = `
+    <script>var player = { source: "https://jkanime.net/jkplayer/umv?e=bar" };</script>
+  `;
+
+  assert.equal(
+    extractPlayerUrlFromEpisodeHtml(html),
+    "https://jkanime.net/jkplayer/umv?e=bar"
   );
 });
 
@@ -339,4 +350,29 @@ test("renderParallelStatus actualiza en el mismo bloque del terminal sin acumula
     process.stdout.write = originalWrite;
     process.stdout.isTTY = originalIsTTY;
   }
+});
+
+test("downloadFile usa ffmpeg para streams HLS y no guarda el manifiesto como video", async () => {
+  const filePath = path.resolve("./tmp/hls-regression.mp4");
+  const calls = [];
+
+  const spawnFn = (command, args) => {
+    calls.push({ command, args });
+    const stream = new (require("node:events").EventEmitter)();
+    stream.stderr = new (require("node:events").EventEmitter)();
+    setImmediate(() => {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, "fake-video-bytes");
+      stream.emit("close", 0);
+    });
+    return stream;
+  };
+
+  const result = await downloadFile("https://example.com/video.m3u8", filePath, { spawnFn, ffmpegPath: "ffmpeg" });
+
+  assert.equal(result, filePath);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "fake-video-bytes");
+  assert.equal(calls[0].command, "ffmpeg");
+  assert.ok(calls[0].args.includes("-i"));
+  assert.ok(calls[0].args.includes("https://example.com/video.m3u8"));
 });

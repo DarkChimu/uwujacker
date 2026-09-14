@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.2] - 2026-09-14
+
+### Fixed
+- Corregida la extracción de URLs del player de JKAnime para rutas modernas (`/jkplayer/um`, `/umv`, `/c1`).
+- Corregido el caso donde el extractor devolvía un manifiesto `.m3u8` en lugar del archivo de video real.
+- Añadido soporte para convertir streams HLS con FFmpeg antes de guardar el archivo final.
+- Reforzada la validación de descargas para evitar archivos vacíos o demasiado pequeños.
+
+### Changed
+- Se actualizó la versión del proyecto para preparar un nuevo release en GitHub.
+
 ## [1.0.1] - 2026-09-13
 
 ### Fixed
