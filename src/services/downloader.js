@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const os = require("node:os");
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const cliProgress = require("cli-progress");
@@ -25,8 +26,13 @@ function formatClock(totalSeconds) {
 // falls back to an indeterminate counter when there is no total at all.
 function formatProgressBar(options, params, payload) {
   const name = payload.name || "";
-  const isTime = payload.unit === "time";
-  const amount = (value) => (isTime ? formatClock(value) : formatBytes(value));
+  const unit = payload.unit;
+  // How each numeric value is rendered: media clock, segment count, or bytes.
+  const amount = (value) =>
+    unit === "time" ? formatClock(value)
+    : unit === "count" ? String(Math.round(value))
+    : formatBytes(value);
+  const noun = unit === "time" ? "procesados" : unit === "count" ? "segmentos" : "descargados";
 
   // `indeterminate` is set by the caller when the total is unknown (no
   // Content-Length, or HLS with no probed duration), so params.total (a
@@ -36,15 +42,15 @@ function formatProgressBar(options, params, payload) {
   if (!known) {
     // No total: just show how much we've pulled/processed so far.
     const done = Number.isFinite(payload.rawValue) ? payload.rawValue : params.value;
-    const label = isTime ? `${amount(done)} procesados` : `${amount(done)} descargados`;
-    return `${name} ⏳ ${label}`;
+    return `${name} ⏳ ${amount(done)} ${noun}`;
   }
 
   const width = 24;
-  const done = Math.round(params.progress * width);
-  const bar = "█".repeat(done) + "░".repeat(width - done);
+  const filled = Math.round(params.progress * width);
+  const bar = "█".repeat(filled) + "░".repeat(width - filled);
   const pct = String(Math.round(params.progress * 100)).padStart(3);
-  return `${name} [${bar}] ${pct}% ${amount(params.value)} / ${amount(params.total)}`;
+  const suffix = unit === "count" ? ` ${noun}` : "";
+  return `${name} [${bar}] ${pct}% ${amount(params.value)} / ${amount(params.total)}${suffix}`;
 }
 
 function shouldSkipExistingFile(filePath) {
@@ -184,6 +190,124 @@ function probeHlsDuration(url, { ffmpegPath = "ffmpeg", spawnFn = spawn } = {}) 
   });
 }
 
+// Parses a media (non-master) m3u8 playlist. Returns the ordered segment URLs
+// (resolved to absolute) and whether the playlist is encrypted or a master
+// playlist — either of which means we must defer to FFmpeg instead of our
+// parallel path. ponytail: only handles the common VOD case; master-playlist
+// variant selection and AES-128 decryption are left to FFmpeg (fallback).
+function parseM3u8(body, baseUrl) {
+  const text = String(body || "");
+  const encrypted = /#EXT-X-KEY(?![^\n]*METHOD=NONE)/i.test(text);
+  const master = /#EXT-X-STREAM-INF/i.test(text);
+
+  const base = new URL(baseUrl);
+  const segments = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    try {
+      segments.push(new URL(trimmed, base).href);
+    } catch {
+      // Ignore malformed entries; if enough are bad, download will fail loudly.
+    }
+  }
+
+  return { segments, encrypted, master };
+}
+
+// Downloads all segments with a bounded concurrency pool. Each segment is
+// retried a few times; a permanently failing segment aborts the whole download
+// (a gap would corrupt the video). Returns nothing; writes files into `dir`.
+async function downloadSegments(segmentUrls, dir, { concurrency = 8, onSegmentDone, fetchFn = fetch } = {}) {
+  let next = 0;
+  let done = 0;
+
+  const fetchSegment = async (url, dest) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const res = await fetchFn(url, { redirect: "follow" });
+        if (!res.ok || !res.body) throw new Error(`estado ${res.status}`);
+        await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(dest));
+        const size = fs.statSync(dest).size;
+        if (size <= 0) throw new Error("segmento vacío");
+        return;
+      } catch (error) {
+        if (attempt === 2) throw new Error(`segmento falló (${url}): ${error.message}`);
+      }
+    }
+  };
+
+  const worker = async () => {
+    while (next < segmentUrls.length) {
+      const index = next;
+      next += 1;
+      // Zero-pad the index so lexical order == playback order for concatenation.
+      const dest = path.join(dir, `seg-${String(index).padStart(6, "0")}.ts`);
+      await fetchSegment(segmentUrls[index], dest);
+      done += 1;
+      if (onSegmentDone) onSegmentDone(done, segmentUrls.length);
+    }
+  };
+
+  const pool = Array.from({ length: Math.min(concurrency, segmentUrls.length) || 1 }, worker);
+  await Promise.all(pool);
+}
+
+// Parallel HLS download: fetch every .ts segment concurrently (segments are
+// served across several CDNs, so this is a big win), concatenate them in order,
+// then let FFmpeg remux the combined stream into a faststart mp4 (-c copy is a
+// near-instant copy, no re-encode). Throws so the caller can fall back to the
+// sequential FFmpeg path when the playlist is encrypted or anything fails.
+async function downloadHlsParallel(url, filePath, options = {}) {
+  const { ffmpegPath = "ffmpeg", spawnFn = spawn, onProgress = null, emit, concurrency = 8 } = options;
+
+  const playlist = await makeRequest(url, { retries: 1 });
+  const { segments, encrypted, master } = parseM3u8(playlist.body, url);
+
+  if (encrypted || master || segments.length === 0) {
+    throw new Error(encrypted ? "playlist cifrada" : master ? "playlist maestra" : "sin segmentos");
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "uwujacker-hls-"));
+  const combined = path.join(tmpDir, "combined.ts");
+
+  try {
+    await downloadSegments(segments, tmpDir, {
+      concurrency,
+      onSegmentDone: (n, total) => {
+        const percent = (n / total) * 100;
+        if (emit) emit({ filePath, downloaded: n, total, percent, final: false, unit: "count" });
+      },
+    });
+
+    // Concatenate .ts bytes in order. Concatenated MPEG-TS is itself valid TS.
+    ensureDirectoryExists(path.dirname(combined));
+    const out = fs.createWriteStream(combined);
+    for (let i = 0; i < segments.length; i += 1) {
+      const seg = path.join(tmpDir, `seg-${String(i).padStart(6, "0")}.ts`);
+      await pipeline(fs.createReadStream(seg), out, { end: i === segments.length - 1 });
+    }
+
+    // Remux the combined TS into mp4 (fast copy, no re-encode).
+    ensureDirectoryExists(path.dirname(filePath));
+    await new Promise((resolve, reject) => {
+      const args = ["-hide_banner", "-loglevel", "error", "-y", "-i", combined, "-c", "copy", "-movflags", "+faststart", filePath];
+      const child = spawnFn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      child.stderr.on("data", (c) => { stderr += String(c); });
+      child.on("error", reject);
+      child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`FFmpeg mux falló: ${stderr.trim() || "sin detalle"}`)));
+    });
+
+    const result = validateDownloadedFile(filePath);
+    if (emit) emit({ filePath, downloaded: result.size, total: result.size, percent: 100, final: true });
+    return result.filePath;
+  } finally {
+    // Best-effort cleanup of the temp segment directory.
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 async function downloadHlsFile(url, filePath, options = {}) {
   const {
     ffmpegPath = "ffmpeg",
@@ -216,21 +340,38 @@ async function downloadHlsFile(url, filePath, options = {}) {
   }
 
   // Single sink for progress: updates our own bar (if any) and forwards to any
-  // upstream collector (the parallel MultiBar).
+  // upstream collector (the parallel MultiBar). Handles both "time" (FFmpeg
+  // sequential path) and "count" (parallel segment path) units.
   const emit = (payload) => {
     if (bar) {
+      const unit = payload.unit || "time";
       if (payload.final) {
         bar.setTotal(bar.getTotal() || 1);
-        bar.update(bar.getTotal(), { name: label, unit: "time", indeterminate: false });
-      } else if (durationSec > 0) {
-        bar.setTotal(Math.ceil(durationSec));
-        bar.update(Math.floor(payload.downloaded), { name: label, unit: "time", indeterminate: false, rawValue: payload.downloaded });
+        bar.update(bar.getTotal(), { name: label, unit, indeterminate: false });
+      } else if (payload.total > 0) {
+        bar.setTotal(Math.ceil(payload.total));
+        bar.update(Math.floor(payload.downloaded), { name: label, unit, indeterminate: false, rawValue: payload.downloaded });
       } else {
-        bar.update(0, { name: label, unit: "time", indeterminate: true, rawValue: payload.downloaded });
+        bar.update(0, { name: label, unit, indeterminate: true, rawValue: payload.downloaded });
       }
     }
     if (onProgress) onProgress(payload);
   };
+
+  // Fast path: download segments in parallel ourselves, then remux. Falls back
+  // to the sequential FFmpeg path below if the playlist can't be handled this
+  // way (encrypted, master playlist) or anything goes wrong.
+  try {
+    const out = await downloadHlsParallel(url, filePath, { ffmpegPath, spawnFn, emit });
+    if (bar) bar.stop();
+    if (!verbose) console.log(`Archivo listo: ${out} (${formatBytes(validateDownloadedFile(out).size)})`);
+    return out;
+  } catch (error) {
+    if (verbose) {
+      console.warn(`Descarga paralela no disponible (${error.message}); usando FFmpeg directo.`);
+    }
+    // fall through to the sequential FFmpeg path
+  }
 
   return new Promise((resolve, reject) => {
     const args = [
@@ -525,5 +666,7 @@ module.exports = {
   downloadFile,
   downloadEpisode,
   downloadEpisodesInParallel,
+  downloadSegments,
+  parseM3u8,
   formatProgressBar,
 };

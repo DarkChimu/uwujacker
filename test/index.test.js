@@ -24,7 +24,7 @@ const {
   searchAnimeByQuery,
   resolveAnimeSlug,
 } = require("../index.js");
-const { formatProgressBar, downloadFile } = require("../src/services/downloader");
+const { formatProgressBar, downloadFile, parseM3u8, downloadSegments } = require("../src/services/downloader");
 const { buildEpisodeFileName } = require("../src/utils/files");
 
 test("parseArgs lee anime, episodio y carpeta", () => {
@@ -526,4 +526,72 @@ test("downloadFile (HLS) reporta progreso real usando la duración de ffprobe", 
   assert.ok(mids.some((p) => Math.round(p.percent) === 50), "debe reportar ~50%");
   assert.ok(mids.every((p) => p.unit === "time"), "HLS reporta en unidad de tiempo");
   assert.ok(progress.some((p) => p.final === true && p.percent === 100));
+});
+
+test("parseM3u8 extrae segmentos en orden y resuelve URLs relativas", () => {
+  const body = [
+    "#EXTM3U",
+    "#EXT-X-VERSION:3",
+    "#EXTINF:9.9,",
+    "seg0.ts",
+    "#EXTINF:9.9,",
+    "https://cdn2.example.com/seg1.ts",
+  ].join("\n");
+
+  const { segments, encrypted, master } = parseM3u8(body, "https://cdn1.example.com/video/index.m3u8");
+
+  assert.equal(encrypted, false);
+  assert.equal(master, false);
+  assert.deepEqual(segments, [
+    "https://cdn1.example.com/video/seg0.ts",
+    "https://cdn2.example.com/seg1.ts",
+  ]);
+});
+
+test("parseM3u8 detecta playlist cifrada y maestra (defiere a FFmpeg)", () => {
+  const encrypted = parseM3u8("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k.key\"\nseg.ts", "https://x/i.m3u8");
+  assert.equal(encrypted.encrypted, true);
+
+  const master = parseM3u8("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv/index.m3u8", "https://x/i.m3u8");
+  assert.equal(master.master, true);
+
+  // METHOD=NONE no cuenta como cifrado.
+  const none = parseM3u8("#EXTM3U\n#EXT-X-KEY:METHOD=NONE\nseg.ts", "https://x/i.m3u8");
+  assert.equal(none.encrypted, false);
+});
+
+test("downloadSegments descarga en paralelo respetando la concurrencia y el orden", async () => {
+  const dir = path.resolve("./tmp/segs");
+  fs.mkdirSync(dir, { recursive: true });
+  const urls = Array.from({ length: 6 }, (_, i) => `https://cdn/seg${i}.ts`);
+
+  let active = 0;
+  let maxActive = 0;
+  const doneOrder = [];
+
+  const fetchFn = async (url) => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((r) => setTimeout(r, 10));
+    active -= 1;
+    const bytes = Buffer.from(`data-${url}`);
+    return {
+      ok: true,
+      body: require("node:stream").Readable.toWeb(require("node:stream").Readable.from([bytes])),
+    };
+  };
+
+  await downloadSegments(urls, dir, {
+    concurrency: 3,
+    fetchFn,
+    onSegmentDone: (n) => doneOrder.push(n),
+  });
+
+  assert.ok(maxActive <= 3, "no debe exceder la concurrencia");
+  assert.equal(doneOrder.length, 6);
+  // Los 6 archivos existen con el padding correcto.
+  for (let i = 0; i < 6; i += 1) {
+    const f = path.join(dir, `seg-${String(i).padStart(6, "0")}.ts`);
+    assert.ok(fs.existsSync(f), `falta ${f}`);
+  }
 });
