@@ -100,3 +100,24 @@ Comprueba que quedó disponible con `ffmpeg -version`.
 ```bash
 yarn test
 ```
+
+## Releases (builds automáticas)
+
+Los binarios se compilan automáticamente con GitHub Actions al publicar un tag de versión. El flujo (`.github/workflows/release.yml`) compila en Windows, macOS y Linux y adjunta los binarios a un GitHub Release.
+
+Para lanzar una versión:
+
+```bash
+# 1. Asegúrate de que package.json tiene la versión correcta y está commiteada
+# 2. Crea y empuja el tag
+git tag v1.1.0
+git push origin v1.1.0
+```
+
+Esto genera el release con:
+
+- `uwujacker-windows.exe` (Windows)
+- `uwujacker-macos-arm64` (macOS Apple Silicon)
+- `uwujacker-linux` (Linux)
+
+Los binarios de macOS/Linux no llevan extensión; dales permiso de ejecución si hace falta (`chmod +x uwujacker-linux`).
