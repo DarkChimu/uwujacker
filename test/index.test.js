@@ -24,7 +24,7 @@ const {
   searchAnimeByQuery,
   resolveAnimeSlug,
 } = require("../index.js");
-const { renderParallelStatus, downloadFile } = require("../src/services/downloader");
+const { formatProgressBar, downloadFile } = require("../src/services/downloader");
 const { buildEpisodeFileName } = require("../src/utils/files");
 
 test("parseArgs lee anime, episodio y carpeta", () => {
@@ -79,16 +79,20 @@ test("extractPlayerUrlFromEpisodeHtml obtiene el iframe del player actual", () =
   );
 });
 
-test("extractPlayerUrlFromEpisodeHtml prioriza el player principal de JKAnime", () => {
+test("extractPlayerUrlFromEpisodeHtml prefiere el player jk (mp4 directo) sobre um/umv (HLS)", () => {
+  // Caso real de JKAnime: varios servidores en la misma página. El player "jk"
+  // entrega un mp4 directo (302 → CDN) que se descarga sin FFmpeg, mientras que
+  // um/umv/c1 devuelven HLS. Debe ganar jk.
   const html = `
-    <script>var video = [];</script>
     <iframe src="https://jkanime.net/jkplayer/um?e=foo"></iframe>
+    <iframe src="https://jkanime.net/jkplayer/umv?e=bar"></iframe>
     <iframe src="https://jkanime.net/jkplayer/jk?u=stream/jkmedia/demo/"></iframe>
+    <iframe src="https://jkanime.net/jkplayer/c1?u="></iframe>
   `;
 
   assert.equal(
     extractPlayerUrlFromEpisodeHtml(html),
-    "https://jkanime.net/jkplayer/um?e=foo"
+    "https://jkanime.net/jkplayer/jk?u=stream/jkmedia/demo/"
   );
 });
 
@@ -118,6 +122,51 @@ test("extractMediaUrlFromPlayerHtml obtiene la URL final del video", () => {
   assert.equal(
     extractMediaUrlFromPlayerHtml(html),
     "https://jkplayers.com/stream/jkmedia/demo/video.mp4"
+  );
+});
+
+test("extractMediaUrlFromPlayerHtml prefiere mp4 directo sobre HLS aunque el m3u8 aparezca primero", () => {
+  const html = `
+    <script>
+      var sources = [
+        { file: "https://cdn.example.com/stream/master.m3u8", type: "hls" },
+        { file: "https://cdn.example.com/stream/video-720.mp4", type: "mp4" }
+      ];
+    </script>
+  `;
+
+  assert.equal(
+    extractMediaUrlFromPlayerHtml(html),
+    "https://cdn.example.com/stream/video-720.mp4"
+  );
+});
+
+test("extractMediaUrlFromPlayerHtml usa HLS solo si no hay archivo directo", () => {
+  const html = `<script>var player = { source: "https://cdn.example.com/stream/master.m3u8" };</script>`;
+
+  assert.equal(
+    extractMediaUrlFromPlayerHtml(html),
+    "https://cdn.example.com/stream/master.m3u8"
+  );
+});
+
+test("extractMediaUrlFromPlayerHtml captura el mp4 de DPlayer aunque la URL no tenga extensión", () => {
+  // Caso real del player "jk": DPlayer con url sin extensión + type: 'mp4'. La
+  // URL redirige a un CDN. Debe reconocerse como directo por el `type`.
+  const html = `
+    <script>
+      new DPlayer({
+        video: {
+          url: 'https://jkplayers.com/stream/jkmedia/abc/def/3/1.2.3.4/',
+          type: 'mp4'
+        }
+      });
+    </script>
+  `;
+
+  assert.equal(
+    extractMediaUrlFromPlayerHtml(html),
+    "https://jkplayers.com/stream/jkmedia/abc/def/3/1.2.3.4/"
   );
 });
 
@@ -322,80 +371,31 @@ test("resolveAnimeSlug convierte un nombre legible en el slug correcto", async (
   assert.equal(slug, "dragon-ball");
 });
 
-test("renderParallelStatus muestra el progreso correctamente", () => {
-  const originalWrite = process.stdout.write;
-  const originalIsTTY = process.stdout.isTTY;
-  const writes = [];
+test("formatProgressBar muestra porcentaje y tamaños cuando se conoce el total", () => {
+  const line = formatProgressBar(
+    {},
+    { total: 40, value: 10, progress: 0.25 },
+    { name: "Ep 01" }
+  );
 
-  process.stdout.isTTY = true;
-  process.stdout.write = (chunk) => {
-    writes.push(String(chunk));
-    return true;
-  };
-
-  try {
-    renderParallelStatus({
-      anime: "naruto",
-      statusMap: new Map([
-        ["1", { episode: "1", name: "Episodio 1", status: "downloading", percent: 35, downloaded: 15, total: 40 }],
-        ["2", { episode: "2", name: "Episodio 2", status: "done", percent: 100, downloaded: 40, total: 40 }],
-      ]),
-      total: 2,
-      completed: 1,
-    });
-
-    const joined = writes.join("");
-    assert.match(joined, /naruto/);
-    assert.match(joined, /1\/2 completados/);
-    assert.match(joined, /Episodio 1/);
-    assert.match(joined, /35%/);
-  } finally {
-    process.stdout.write = originalWrite;
-    process.stdout.isTTY = originalIsTTY;
-  }
+  assert.match(line, /Ep 01/);
+  assert.match(line, /25%/);
+  // Debe mostrar bytes descargados y totales formateados.
+  assert.match(line, /10\.00 B/);
+  assert.match(line, /40\.00 B/);
 });
 
-test("renderParallelStatus actualiza en el mismo bloque del terminal sin acumular líneas", () => {
-  const originalWrite = process.stdout.write;
-  const originalIsTTY = process.stdout.isTTY;
-  const writes = [];
+test("formatProgressBar cae a modo indeterminado (bytes) sin total conocido", () => {
+  const line = formatProgressBar(
+    {},
+    { total: 1, value: 0, progress: 0 },
+    { name: "Ep 02", indeterminate: true, rawValue: 2048 }
+  );
 
-  process.stdout.isTTY = true;
-  process.stdout.write = (chunk) => {
-    writes.push(String(chunk));
-    return true;
-  };
-
-  try {
-    renderParallelStatus({
-      anime: "naruto",
-      statusMap: new Map([
-        ["1", { episode: "1", name: "Episodio 1", status: "downloading", percent: 25, downloaded: 10, total: 40 }],
-        ["2", { episode: "2", name: "Episodio 2", status: "done", percent: 100, downloaded: 40, total: 40 }],
-      ]),
-      total: 2,
-      completed: 1,
-    });
-
-    renderParallelStatus.lastRenderedAt = 0;
-    renderParallelStatus.lastOutput = "";
-    renderParallelStatus({
-      anime: "naruto",
-      statusMap: new Map([
-        ["1", { episode: "1", name: "Episodio 1", status: "downloading", percent: 75, downloaded: 30, total: 40 }],
-        ["2", { episode: "2", name: "Episodio 2", status: "done", percent: 100, downloaded: 40, total: 40 }],
-      ]),
-      total: 2,
-      completed: 1,
-    });
-
-    assert.ok(writes.some((chunk) => /\u001b\[[0-9]+A/.test(chunk)));
-    assert.ok(writes.some((chunk) => chunk.includes("\u001b[2K")));
-    assert.ok(writes.every((chunk) => !chunk.includes("\u001b[2J\u001b[H")));
-  } finally {
-    process.stdout.write = originalWrite;
-    process.stdout.isTTY = originalIsTTY;
-  }
+  assert.match(line, /Ep 02/);
+  // Sin porcentaje; muestra los bytes descargados desde el payload.
+  assert.doesNotMatch(line, /%/);
+  assert.match(line, /2\.00 KB descargados/);
 });
 
 test("downloadFile usa ffmpeg para streams HLS y no guarda el manifiesto como video", async () => {

@@ -2,123 +2,37 @@ const fs = require("fs");
 const path = require("path");
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
+const cliProgress = require("cli-progress");
 const { ensureDirectoryExists, formatBytes, validateDownloadedFile, buildEpisodeFileName } = require("../utils/files");
 const { makeRequest, extractPlayerUrlFromEpisodeHtml, extractMediaUrlFromPlayerHtml } = require("./jkanime");
 const { spawn } = require("child_process");
 
-function canUseAnsiProgress() {
-  if (!process.stdout || !process.stdout.isTTY || process.env.TERM === "dumb") {
-    return false;
-  }
-
-  return true;
+function isInteractive() {
+  return Boolean(process.stdout && process.stdout.isTTY && process.env.TERM !== "dumb");
 }
 
-function moveCursorUp(lines) {
-  return lines > 0 ? `\x1b[${lines}A` : "";
+// Formatter shared by single and multi bars. Shows a real percentage bar when
+// the total size is known, and falls back to a byte counter (indeterminate)
+// when the server does not send Content-Length.
+function formatProgressBar(options, params, payload) {
+  const name = payload.name || "";
+  // `indeterminate` is set by the caller when the server sent no Content-Length,
+  // so we can't trust params.total (a sentinel of 1 is used to keep the bar alive).
+  const known = !payload.indeterminate && params.total > 0 && Number.isFinite(params.total);
+
+  if (!known) {
+    // Indeterminate: no percentage, just how much we've pulled so far. The real
+    // byte count is carried in the payload since `value` drives the (unknown) %.
+    const bytes = Number.isFinite(payload.rawValue) ? payload.rawValue : params.value;
+    return `${name} ⏳ ${formatBytes(bytes)} descargados`;
+  }
+
+  const width = 24;
+  const done = Math.round(params.progress * width);
+  const bar = "█".repeat(done) + "░".repeat(width - done);
+  const pct = String(Math.round(params.progress * 100)).padStart(3);
+  return `${name} [${bar}] ${pct}% ${formatBytes(params.value)} / ${formatBytes(params.total)}`;
 }
-
-function clearLine() {
-  return "\x1b[2K\r";
-}
-
-// Single-file progress bar drawn with a carriage return, replacing the external
-// `progress` dependency. Matches the ASCII bar style of the parallel renderer.
-function renderSingleProgress(label, downloaded, total) {
-  if (!process.stdout || !process.stdout.isTTY || total <= 0) {
-    return;
-  }
-
-  const barWidth = 30;
-  const percent = Math.max(0, Math.min(100, (downloaded / total) * 100));
-  const filled = Math.round((percent / 100) * barWidth);
-  const bar = `[${"=".repeat(filled)}${" ".repeat(barWidth - filled)}]`;
-  const line = `${label} ${bar} ${Math.round(percent)}% (${formatBytes(downloaded)} / ${formatBytes(total)})`;
-  process.stdout.write(`${clearLine()}${line}`);
-}
-
-function renderProgressBlock(lines) {
-  if (!process.stdout || !process.stdout.isTTY) {
-    return;
-  }
-
-  if (renderParallelStatus.lastLines > 0) {
-    process.stdout.write(moveCursorUp(renderParallelStatus.lastLines));
-  }
-
-  process.stdout.write(lines.map((line) => `${clearLine()}${line}\n`).join(""));
-  renderParallelStatus.lastLines = lines.length;
-}
-
-function renderParallelStatus({ anime, statusMap, total, completed }) {
-  const entries = [...statusMap.values()]
-    .filter((entry) => entry.status === "downloading" || entry.status === "done" || entry.status === "error")
-    .sort((left, right) => Number(left.episode) - Number(right.episode));
-
-  const episodeNameWidth = 18;
-  const barWidth = 24;
-
-  const lines = [
-    `${anime} • ${completed}/${total} completados`,
-    ...entries.map((entry) => {
-      const label = entry.status === "done"
-        ? "OK"
-        : entry.status === "error"
-          ? "ERR"
-          : "DL";
-
-      const percent = Number.isFinite(entry.percent) ? Math.max(0, Math.min(100, entry.percent)) : 0;
-      const filled = Math.round((percent / 100) * barWidth);
-      const bar = `[${"=".repeat(filled)}${" ".repeat(barWidth - filled)}]`;
-
-      const sizeText = entry.total > 0
-        ? `${formatBytes(entry.downloaded)} / ${formatBytes(entry.total)}`
-        : entry.status === "done"
-          ? "Completado"
-          : entry.status === "error"
-            ? "Error"
-            : "Descargando";
-
-      const statusText = entry.total > 0
-        ? `${Math.round(percent)}% • ${sizeText}`
-        : sizeText;
-
-      const episodeText = `  ${String(entry.episode).padStart(2, "0")}. ${String(entry.name).padEnd(episodeNameWidth)} ${String(label).padEnd(3)} ${bar.padEnd(barWidth + 2)} ${statusText}`;
-      return episodeText;
-    }),
-  ];
-
-  const output = lines.join("\n");
-
-  if (!process.stdout || !process.stdout.isTTY) {
-    return;
-  }
-
-  if (renderParallelStatus.lastOutput === output) {
-    return;
-  }
-
-  if (!canUseAnsiProgress()) {
-    renderParallelStatus.lastOutput = output;
-    renderParallelStatus.lastLines = 0;
-    renderParallelStatus.lastRenderedAt = Date.now();
-    return;
-  }
-
-  const now = Date.now();
-  const throttleMs = 120;
-  if (renderParallelStatus.lastRenderedAt && now - renderParallelStatus.lastRenderedAt < throttleMs) {
-    return;
-  }
-
-  renderParallelStatus.lastRenderedAt = now;
-  renderParallelStatus.lastOutput = output;
-  renderProgressBlock(lines);
-}
-
-renderParallelStatus.lastLines = 0;
-renderParallelStatus.lastRenderedAt = 0;
-renderParallelStatus.lastOutput = "";
 
 function shouldSkipExistingFile(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -156,24 +70,38 @@ async function downloadFile(url, filePath, options = {}) {
     }
 
     const contentLength = Number.parseInt(response.headers.get("content-length") || "0", 10);
+    const label = path.basename(targetPath);
 
-    const showProgress = !verbose && Number.isFinite(contentLength) && contentLength > 0 && !onProgress;
+    // Show a standalone bar only for a lone download: not verbose, interactive,
+    // and when nobody upstream is collecting progress (the parallel path owns
+    // its own MultiBar and passes onProgress).
+    const showBar = !verbose && !onProgress && isInteractive();
+    const bar = showBar
+      ? new cliProgress.SingleBar(
+          { format: formatProgressBar, hideCursor: true, clearOnComplete: false, stopOnComplete: true },
+          cliProgress.Presets.shades_classic
+        )
+      : null;
+    // cli-progress needs a positive total; when unknown we pass a sentinel and
+    // the formatter renders an indeterminate byte counter instead of a %.
+    if (bar) bar.start(contentLength > 0 ? contentLength : 1, 0, { name: label, indeterminate: contentLength <= 0, rawValue: 0 });
 
-    if (!showProgress && !onProgress) {
-      console.log(`Descargando ${path.basename(targetPath)}${verbose ? " (verbose)" : ""}...`);
+    if (!bar && !onProgress) {
+      console.log(`Descargando ${label}${verbose ? " (verbose)" : ""}...`);
     }
 
     // fetch's response.body is a web ReadableStream; convert to a Node stream so
     // we can observe chunks (progress) and pipe to disk with backpressure.
     const nodeStream = Readable.fromWeb(response.body);
     const writer = fs.createWriteStream(targetPath, { flags: "w" });
-    const label = path.basename(targetPath);
     let downloaded = 0;
 
     nodeStream.on("data", (chunk) => {
       downloaded += chunk.length;
-      if (showProgress) {
-        renderSingleProgress(label, downloaded, contentLength);
+      if (bar) {
+        bar.payload.rawValue = downloaded;
+        if (contentLength > 0) bar.update(downloaded, { name: label });
+        else bar.update(0, { name: label, indeterminate: true, rawValue: downloaded });
       }
       if (onProgress) {
         const percent = contentLength > 0 ? (downloaded / contentLength) * 100 : 0;
@@ -181,15 +109,17 @@ async function downloadFile(url, filePath, options = {}) {
       }
     });
 
-    await pipeline(nodeStream, writer);
+    try {
+      await pipeline(nodeStream, writer);
+    } finally {
+      if (bar) bar.stop();
+    }
 
     const result = validateDownloadedFile(targetPath);
     if (onProgress) {
       onProgress({ filePath: targetPath, downloaded: result.size, total: result.size, percent: 100, final: true });
     }
-    if (showProgress) {
-      renderSingleProgress(label, result.size, result.size);
-      if (process.stdout.isTTY) process.stdout.write("\n");
+    if (bar || !onProgress) {
       console.log(`Archivo listo: ${result.filePath} (${formatBytes(result.size)})`);
     }
     return result.filePath;
@@ -356,7 +286,6 @@ async function downloadEpisodesInParallel({
   downloadEpisodeFn = downloadEpisode,
 }) {
   const queue = [...episodes];
-  const statusMap = new Map();
   const results = [];
   const failures = [];
   let nextIndex = 0;
@@ -364,57 +293,41 @@ async function downloadEpisodesInParallel({
   let successCount = 0;
   let errorCount = 0;
 
+  // Episodes already on disk are counted up front and never get a bar.
+  const pendingEpisodes = [];
   for (const episode of queue) {
     const filePath = path.resolve(folder, buildEpisodeFileName(anime, episode));
     if (skipExisting && !overwrite && shouldSkipExistingFile(filePath)) {
-      statusMap.set(String(episode), {
-        episode: String(episode),
-        name: `Episodio ${episode}`,
-        status: "done",
-        percent: 100,
-        downloaded: 0,
-        total: 0,
-      });
       completed += 1;
       successCount += 1;
       continue;
     }
-
-    statusMap.set(String(episode), {
-      episode: String(episode),
-      name: `Episodio ${episode}`,
-      status: "queued",
-      percent: 0,
-      downloaded: 0,
-      total: 0,
-    });
+    pendingEpisodes.push(episode);
   }
 
-  const pendingEpisodes = queue.filter((episode) => {
-    const key = String(episode);
-    const entry = statusMap.get(key);
-    return !(entry && entry.status === "done" && entry.percent === 100);
-  });
-
   const total = queue.length;
-  const renderStatus = () => renderParallelStatus({ anime, statusMap, total, completed });
+
+  // One MultiBar with a line per pending episode. Only in an interactive,
+  // non-verbose terminal — verbose mode logs interleave and would corrupt bars,
+  // and a non-TTY (piped/redirected) gets a plain summary at the end.
+  const useBars = isInteractive() && !verbose && pendingEpisodes.length > 0;
+  const multibar = useBars
+    ? new cliProgress.MultiBar(
+        { format: formatProgressBar, hideCursor: true, clearOnComplete: false, autopadding: true, forceRedraw: true },
+        cliProgress.Presets.shades_classic
+      )
+    : null;
+  const bars = new Map();
 
   const worker = async () => {
     while (nextIndex < pendingEpisodes.length) {
-      const currentIndex = nextIndex;
+      const episode = pendingEpisodes[nextIndex];
       nextIndex += 1;
-      const episode = pendingEpisodes[currentIndex];
       const episodeKey = String(episode);
+      const name = `Ep ${String(episode).padStart(2, "0")}`;
 
-      statusMap.set(episodeKey, {
-        episode: episodeKey,
-        name: `Episodio ${episode}`,
-        status: "downloading",
-        percent: 0,
-        downloaded: 0,
-        total: 0,
-      });
-      renderStatus();
+      const bar = multibar ? multibar.create(1, 0, { name, indeterminate: true, rawValue: 0 }) : null;
+      if (bar) bars.set(episodeKey, bar);
 
       try {
         const filePath = await downloadEpisodeFn({
@@ -429,64 +342,46 @@ async function downloadEpisodesInParallel({
           verbose,
           overwrite,
           skipExisting,
-          // onProgress only reflects visual state. Counting happens once, below,
-          // when the episode promise settles — so completed/successCount stay
-          // deterministic regardless of whether onProgress ever fires.
+          // onProgress drives only the visual bar. Counting happens once, below,
+          // when the episode promise settles, so totals stay deterministic even
+          // if onProgress never fires (e.g. HLS via FFmpeg reports no bytes).
           onProgress: ({ downloaded, total: totalSize, percent, final = false }) => {
-            const item = statusMap.get(episodeKey) || {
-              episode: episodeKey,
-              name: `Episodio ${episode}`,
-              status: "downloading",
-              percent: 0,
-              downloaded: 0,
-              total: 0,
-            };
-
-            item.status = final ? "done" : "downloading";
-            item.downloaded = downloaded || 0;
-            item.total = totalSize || item.total || 0;
-            item.percent = Number.isFinite(percent) ? percent : item.percent || 0;
-            statusMap.set(episodeKey, item);
-            renderStatus();
+            if (!bar) return;
+            bar.payload.rawValue = downloaded || 0;
+            if (totalSize > 0) {
+              bar.setTotal(totalSize);
+              bar.update(final ? totalSize : downloaded, { name, indeterminate: false });
+            } else {
+              bar.update(0, { name, indeterminate: true, rawValue: downloaded || 0 });
+            }
           },
         });
 
-        statusMap.set(episodeKey, {
-          episode: episodeKey,
-          name: `Episodio ${episode}`,
-          status: "done",
-          percent: 100,
-          downloaded: 0,
-          total: 0,
-        });
+        if (bar) {
+          const finalTotal = bar.getTotal() || 1;
+          bar.setTotal(finalTotal);
+          bar.update(finalTotal, { name: `${name} ✓`, indeterminate: false });
+        }
         completed += 1;
         successCount += 1;
         results.push(filePath);
-        renderStatus();
       } catch (error) {
-        // A single failing episode must not abort the rest of the batch. Record
-        // it, keep going, and surface the failures in the final summary.
-        statusMap.set(episodeKey, {
-          episode: episodeKey,
-          name: `Episodio ${episode}`,
-          status: "error",
-          percent: 0,
-          downloaded: 0,
-          total: 0,
-        });
+        // A single failing episode must not abort the rest of the batch.
         completed += 1;
         errorCount += 1;
         failures.push({ episode: episodeKey, error: error.message || String(error) });
+        if (bar) bar.update(0, { name: `${name} ✗` });
         if (verbose) {
           console.warn(`Episodio ${episode} falló: ${error.message || error}`);
         }
-        renderStatus();
       }
     }
   };
 
   const workers = Array.from({ length: Math.min(concurrency, pendingEpisodes.length) || 1 }, worker);
   await Promise.all(workers);
+
+  if (multibar) multibar.stop();
 
   const summaryLines = [
     "Resumen:",
@@ -499,21 +394,6 @@ async function downloadEpisodesInParallel({
       : []),
   ];
 
-  if (process.stdout.isTTY) {
-    if (renderParallelStatus.lastLines > 0) {
-      process.stdout.write(moveCursorUp(renderParallelStatus.lastLines));
-    }
-
-    process.stdout.write("\x1b[2J\x1b[H");
-    process.stdout.write(`${summaryLines.join("\n")}\n`);
-    process.stdout.write("\x1b[?25h");
-
-    renderParallelStatus.lastLines = 0;
-    renderParallelStatus.lastRenderedAt = 0;
-    renderParallelStatus.lastOutput = "";
-    return results;
-  }
-
   console.log(summaryLines.join("\n"));
   return results;
 }
@@ -522,5 +402,5 @@ module.exports = {
   downloadFile,
   downloadEpisode,
   downloadEpisodesInParallel,
-  renderParallelStatus,
+  formatProgressBar,
 };

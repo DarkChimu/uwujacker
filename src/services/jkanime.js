@@ -94,34 +94,25 @@ function normalizeVideoCandidate(candidate) {
 function extractPlayerUrlFromEpisodeHtml(html, server = "jk") {
   if (!html || typeof html !== "string") return null;
 
-  const modernPattern = /https?:\/\/[^"'\s<>]*\/jkplayer\/(?:um|umv|c1)[^"'\s<>]*/i;
-  const legacyPattern = /https?:\/\/[^"'\s<>]*\/jkplayer\/jk\?u=[^"'\s<>]*/i;
-  const relativePattern = /(?:\/)?jkplayer\/(?:um|umv|c1|jk)(?:\?[^"'\s<>]+|\/[^"'\s<>]+)?/i;
-  const iframePattern = /<iframe[^>]+src=["']([^"']+)["'][^>]*>/i;
+  // Gather every jkplayer URL on the page, then prefer the "jk" player: it
+  // serves a direct mp4 (302 → CDN) that downloads without FFmpeg, whereas
+  // um/umv/c1 return HLS (.m3u8). This is the opposite of the old order, which
+  // forced HLS even when a direct file was available.
+  // Note: longer alternatives first (umv before um) so the regex doesn't stop at
+  // the "um" prefix of "umv" and truncate the URL.
+  const all = [...html.matchAll(/(?:https?:\/\/[^"'\s<>]*)?\/?jkplayer\/(?:jk|umv|um|c1)(?:\?[^"'\s<>]*|\/[^"'\s<>]*)?/gi)]
+    .map((m) => resolveAbsoluteUrl(normalizeVideoCandidate(m[0]), DEFAULT_BASE_URL))
+    .filter(Boolean);
 
-  const candidates = [];
+  const preferred = server && server !== "jk" ? server : "jk";
+  const priority = [preferred, "jk", "umv", "um", "c1"];
 
-  const modernMatch = html.match(modernPattern) || html.match(relativePattern);
-  if (modernMatch) candidates.push(modernMatch[0]);
-
-  const legacyMatch = html.match(legacyPattern) || html.match(/(?:\/)?jkplayer\/jk\?u=[^"'\s<>]*/i);
-  if (legacyMatch) candidates.push(legacyMatch[0]);
-
-  const iframeMatch = html.match(iframePattern);
-  if (iframeMatch) candidates.push(iframeMatch[1]);
-
-  const srcMatch = html.match(/src=["']([^"']*jkplayer[^"']+)["']/i);
-  if (srcMatch) candidates.push(srcMatch[1]);
-
-  for (const candidate of candidates) {
-    const normalized = normalizeVideoCandidate(candidate);
-    if (!normalized) continue;
-
-    const resolved = resolveAbsoluteUrl(normalized, DEFAULT_BASE_URL);
-    if (resolved && /jkplayer\/(?:um|umv|c1|jk)/i.test(resolved)) {
-      return resolved;
-    }
+  for (const key of priority) {
+    const hit = all.find((url) => new RegExp(`/jkplayer/${key}(?:[?/]|$)`, "i").test(url));
+    if (hit) return hit;
   }
+
+  if (all.length) return all[0];
 
   const $ = cheerio.load(html);
   const iframe = $('iframe').first().attr("src");
@@ -149,49 +140,74 @@ function extractPlayerUrlFromEpisodeHtml(html, server = "jk") {
 function extractMediaUrlFromPlayerHtml(html) {
   if (!html || typeof html !== "string") return null;
 
-  const patterns = [
-    /https?:\/\/[^"'\s<>]+\.(?:m3u8|mp4|mkv|webm)(?:\?[^"'\s<>]*)?/i,
-    /"(?:file|src|url)"\s*:\s*"([^"']+)"/i,
-    /'(?:file|src|url)'\s*:\s*'([^']+)'/i,
-    /source\s*src=["']([^"']+)["']/i,
-    /video\s*:\s*\{[^}]*src\s*:\s*["']([^"']+)["']/i,
-    /https?:\/\/jkplayers\.com\/stream\/[^"'\s<>]+/i,
-    /https?:\/\/[^"'\s<>]+stream[^"'\s<>]+/i,
-  ];
+  // Collect ALL media candidates with their declared kind, then pick the best.
+  // A direct file (mp4/mkv/webm) always wins over an HLS (.m3u8) playlist so we
+  // avoid FFmpeg when a plain container is available. Crucially, JKAnime's "jk"
+  // player exposes a DPlayer block like `video: { url: '...', type: 'mp4' }`
+  // whose URL has NO file extension (it 302-redirects to a CDN), so we must
+  // trust the declared `type` — matching on extension alone would miss it.
+  const candidates = [];
 
-  for (const pattern of patterns) {
-    const match = html.match(pattern);
-    if (match) {
-      const candidate = normalizeVideoCandidate(match[1] || match[0]);
-      if (candidate && /\.(m3u8|mp4|mkv|webm)(\?.*)?$/i.test(candidate)) {
-        return candidate;
-      }
-      if (candidate) return candidate;
-    }
+  const add = (value, kind) => {
+    const normalized = normalizeVideoCandidate(value);
+    if (normalized) candidates.push({ url: normalized, kind });
+  };
+
+  // 1) DPlayer-style object: capture url + its declared type together.
+  //    e.g. video: { url: 'https://.../', type: 'mp4' }
+  for (const m of html.matchAll(/\burl\s*:\s*["']([^"']+)["']\s*,\s*type\s*:\s*["']([^"']+)["']/gi)) {
+    const declared = /mp4|mkv|webm/i.test(m[2]) ? "direct" : /m3u8|hls/i.test(m[2]) ? "hls" : "other";
+    add(m[1], declared);
+  }
+
+  // 2) URLs that carry an explicit media extension.
+  for (const m of html.matchAll(/https?:\/\/[^"'\s<>]+\.(?:m3u8|mp4|mkv|webm)(?:\?[^"'\s<>]*)?/gi)) {
+    add(m[0], /\.m3u8/i.test(m[0]) ? "hls" : "direct");
+  }
+
+  // 3) Generic file/src/url keys (kind inferred later from the URL).
+  for (const m of html.matchAll(/["'](?:file|src|url)["']\s*:\s*["']([^"']+)["']/gi)) {
+    add(m[1], null);
+  }
+  for (const m of html.matchAll(/<source[^>]+src=["']([^"']+)["']/gi)) {
+    add(m[1], null);
   }
 
   const $ = cheerio.load(html);
-  const urlCandidates = [
-    $('video source').first().attr("src"),
-    $('video').first().attr("src"),
-    $('source').first().attr("src"),
-    $('meta[property="og:video"]').first().attr("content"),
-  ].filter(Boolean);
+  for (const sel of ["video source", "video", "source"]) {
+    $(sel).each((_, el) => add($(el).attr("src"), null));
+  }
+  add($('meta[property="og:video"]').first().attr("content"), null);
 
-  for (const candidate of urlCandidates) {
-    const normalized = normalizeVideoCandidate(candidate);
-    if (normalized && /\.(m3u8|mp4|mkv|webm)(\?.*)?$/i.test(normalized)) {
-      return normalized;
-    }
+  return pickBestMediaUrl(candidates);
+}
+
+// Ranks media candidates so a directly downloadable file is preferred over an
+// HLS playlist. Each candidate is { url, kind } where kind is "direct", "hls",
+// "other" or null (infer from the URL extension). Returns the best URL or null.
+function pickBestMediaUrl(candidates) {
+  const seen = new Set();
+  const directExt = /\.(?:mp4|mkv|webm)(?:\?.*)?$/i;
+  const hlsExt = /\.m3u8(?:\?.*)?$/i;
+
+  let direct = null;
+  let hls = null;
+  let other = null;
+
+  for (const { url, kind } of candidates) {
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+
+    const resolvedKind = kind
+      || (directExt.test(url) ? "direct" : hlsExt.test(url) ? "hls" : "other");
+
+    if (resolvedKind === "direct" && !direct) direct = url;
+    else if (resolvedKind === "hls" && !hls) hls = url;
+    else if (!other) other = url;
   }
 
-  const scriptRegex = /https?:\/\/[^"'\s<>]+(?:m3u8|mp4|mkv|webm)[^"'\s<>]*/gi;
-  const scriptMatches = html.match(scriptRegex);
-  if (scriptMatches && scriptMatches.length) {
-    return normalizeVideoCandidate(scriptMatches[0]);
-  }
-
-  return null;
+  // Priority: direct file > HLS playlist > anything else that looked like media.
+  return direct || hls || other || null;
 }
 
 async function searchAnimeByQuery(query, options = {}) {
