@@ -398,19 +398,36 @@ test("formatProgressBar cae a modo indeterminado (bytes) sin total conocido", ()
   assert.match(line, /2\.00 KB descargados/);
 });
 
+// Fake child process con stdout/stderr para simular ffprobe/ffmpeg sin binarios.
+function fakeChild() {
+  const EventEmitter = require("node:events").EventEmitter;
+  const stream = new EventEmitter();
+  stream.stdout = new EventEmitter();
+  stream.stderr = new EventEmitter();
+  return stream;
+}
+
 test("downloadFile usa ffmpeg para streams HLS y no guarda el manifiesto como video", async () => {
   const filePath = path.resolve("./tmp/hls-regression.mp4");
   const calls = [];
 
   const spawnFn = (command, args) => {
     calls.push({ command, args });
-    const stream = new (require("node:events").EventEmitter)();
-    stream.stderr = new (require("node:events").EventEmitter)();
-    setImmediate(() => {
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      fs.writeFileSync(filePath, "fake-video-bytes");
-      stream.emit("close", 0);
-    });
+    const stream = fakeChild();
+    if (/ffprobe/i.test(command)) {
+      // Simula la duración (segundos) que ffprobe imprime en stdout.
+      setImmediate(() => {
+        stream.stdout.emit("data", "1417.5\n");
+        stream.emit("close", 0);
+      });
+    } else {
+      setImmediate(() => {
+        stream.stdout.emit("data", "out_time_us=708750000\n");
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, "fake-video-bytes");
+        stream.emit("close", 0);
+      });
+    }
     return stream;
   };
 
@@ -418,20 +435,28 @@ test("downloadFile usa ffmpeg para streams HLS y no guarda el manifiesto como vi
 
   assert.equal(result, filePath);
   assert.equal(fs.readFileSync(filePath, "utf8"), "fake-video-bytes");
-  assert.equal(calls[0].command, "ffmpeg");
-  assert.ok(calls[0].args.includes("-i"));
-  assert.ok(calls[0].args.includes("https://example.com/video.m3u8"));
+  // Se consultó ffprobe primero y luego ffmpeg con los argumentos correctos.
+  assert.ok(calls.some((c) => /ffprobe/i.test(c.command)));
+  const ff = calls.find((c) => c.command === "ffmpeg");
+  assert.ok(ff, "debe invocar ffmpeg");
+  assert.ok(ff.args.includes("-i"));
+  assert.ok(ff.args.includes("https://example.com/video.m3u8"));
+  assert.ok(ff.args.includes("-progress"), "debe pedir progreso estructurado");
 });
 
 test("downloadFile da un mensaje claro cuando falta FFmpeg (ENOENT)", async () => {
-  const spawnFn = () => {
-    const stream = new (require("node:events").EventEmitter)();
-    stream.stderr = new (require("node:events").EventEmitter)();
-    setImmediate(() => {
-      const err = new Error("spawn ffmpeg ENOENT");
-      err.code = "ENOENT";
-      stream.emit("error", err);
-    });
+  const spawnFn = (command) => {
+    const stream = fakeChild();
+    if (/ffprobe/i.test(command)) {
+      // ffprobe también ausente: cierra sin duración; no debe romper el flujo.
+      setImmediate(() => stream.emit("close", 1));
+    } else {
+      setImmediate(() => {
+        const err = new Error("spawn ffmpeg ENOENT");
+        err.code = "ENOENT";
+        stream.emit("error", err);
+      });
+    }
     return stream;
   };
 
@@ -467,4 +492,38 @@ test("downloadFile descarga por HTTP con fetch nativo y escribe el archivo", asy
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("downloadFile (HLS) reporta progreso real usando la duración de ffprobe", async () => {
+  const filePath = path.resolve("./tmp/hls-progress.mp4");
+  const progress = [];
+
+  const spawnFn = (command) => {
+    const stream = fakeChild();
+    if (/ffprobe/i.test(command)) {
+      setImmediate(() => {
+        stream.stdout.emit("data", "100\n"); // 100 s de duración total
+        stream.emit("close", 0);
+      });
+    } else {
+      setImmediate(() => {
+        // ffmpeg emite tiempo procesado en microsegundos: 25s y 50s de 100s.
+        stream.stdout.emit("data", "out_time_us=25000000\n");
+        stream.stdout.emit("data", "out_time_us=50000000\n");
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, "x".repeat(1024));
+        stream.emit("close", 0);
+      });
+    }
+    return stream;
+  };
+
+  await downloadFile("https://example.com/video.m3u8", filePath, { spawnFn, onProgress: (p) => progress.push(p) });
+
+  // Progreso intermedio real (no salta 0→100): 25% y 50%.
+  const mids = progress.filter((p) => !p.final);
+  assert.ok(mids.some((p) => Math.round(p.percent) === 25), "debe reportar ~25%");
+  assert.ok(mids.some((p) => Math.round(p.percent) === 50), "debe reportar ~50%");
+  assert.ok(mids.every((p) => p.unit === "time"), "HLS reporta en unidad de tiempo");
+  assert.ok(progress.some((p) => p.final === true && p.percent === 100));
 });

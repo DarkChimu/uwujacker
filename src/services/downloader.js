@@ -11,27 +11,40 @@ function isInteractive() {
   return Boolean(process.stdout && process.stdout.isTTY && process.env.TERM !== "dumb");
 }
 
+// Renders "MM:SS" from a number of seconds. Used for HLS, where progress is
+// measured in media time rather than bytes.
+function formatClock(totalSeconds) {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const mm = String(Math.floor(s / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
 // Formatter shared by single and multi bars. Shows a real percentage bar when
-// the total size is known, and falls back to a byte counter (indeterminate)
-// when the server does not send Content-Length.
+// the total is known; renders time (HLS) or bytes (direct) as the unit; and
+// falls back to an indeterminate counter when there is no total at all.
 function formatProgressBar(options, params, payload) {
   const name = payload.name || "";
-  // `indeterminate` is set by the caller when the server sent no Content-Length,
-  // so we can't trust params.total (a sentinel of 1 is used to keep the bar alive).
+  const isTime = payload.unit === "time";
+  const amount = (value) => (isTime ? formatClock(value) : formatBytes(value));
+
+  // `indeterminate` is set by the caller when the total is unknown (no
+  // Content-Length, or HLS with no probed duration), so params.total (a
+  // sentinel of 1) can't be trusted.
   const known = !payload.indeterminate && params.total > 0 && Number.isFinite(params.total);
 
   if (!known) {
-    // Indeterminate: no percentage, just how much we've pulled so far. The real
-    // byte count is carried in the payload since `value` drives the (unknown) %.
-    const bytes = Number.isFinite(payload.rawValue) ? payload.rawValue : params.value;
-    return `${name} ⏳ ${formatBytes(bytes)} descargados`;
+    // No total: just show how much we've pulled/processed so far.
+    const done = Number.isFinite(payload.rawValue) ? payload.rawValue : params.value;
+    const label = isTime ? `${amount(done)} procesados` : `${amount(done)} descargados`;
+    return `${name} ⏳ ${label}`;
   }
 
   const width = 24;
   const done = Math.round(params.progress * width);
   const bar = "█".repeat(done) + "░".repeat(width - done);
   const pct = String(Math.round(params.progress * 100)).padStart(3);
-  return `${name} [${bar}] ${pct}% ${formatBytes(params.value)} / ${formatBytes(params.total)}`;
+  return `${name} [${bar}] ${pct}% ${amount(params.value)} / ${amount(params.total)}`;
 }
 
 function shouldSkipExistingFile(filePath) {
@@ -58,7 +71,10 @@ async function downloadFile(url, filePath, options = {}) {
   const { downloadFn = null, verbose = false, quality = null, retries = 0, onProgress = null, ffmpegPath = "ffmpeg", spawnFn = spawn } = options;
 
   if (isHlsUrl(url)) {
-    return downloadHlsFile(url, filePath, { ffmpegPath, spawnFn, onProgress, verbose });
+    // A lone HLS download has no upstream progress collector, so let the HLS
+    // path own a SingleBar itself (same condition as the direct-download path).
+    const ownBar = !verbose && !onProgress && isInteractive();
+    return downloadHlsFile(url, filePath, { ffmpegPath, spawnFn, onProgress, verbose, ownBar });
   }
 
   const writerFn = downloadFn || (async (targetUrl, targetPath) => {
@@ -132,45 +148,147 @@ function isHlsUrl(url) {
   return /\.m3u8(?:\?|$)/i.test(String(url || ""));
 }
 
-function downloadHlsFile(url, filePath, options = {}) {
+// Derives the ffprobe path from the ffmpeg path (they ship together), so a
+// custom ffmpeg location keeps ffprobe alongside it.
+function ffprobePathFrom(ffmpegPath) {
+  return ffmpegPath.replace(/ffmpeg(\.exe)?$/i, "ffprobe$1");
+}
+
+// Asks ffprobe for the total duration (seconds) of the stream. Resolves 0 when
+// ffprobe is missing or can't determine it, so the caller falls back to an
+// indeterminate progress display instead of failing.
+function probeHlsDuration(url, { ffmpegPath = "ffmpeg", spawnFn = spawn } = {}) {
+  return new Promise((resolve) => {
+    const args = [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      url,
+    ];
+
+    let child;
+    try {
+      child = spawnFn(ffprobePathFrom(ffmpegPath), args, { stdio: ["ignore", "pipe", "ignore"] });
+    } catch (error) {
+      resolve(0);
+      return;
+    }
+
+    let out = "";
+    child.stdout.on("data", (chunk) => { out += String(chunk); });
+    child.on("error", () => resolve(0));
+    child.on("close", () => {
+      const seconds = Number.parseFloat(out.trim());
+      resolve(Number.isFinite(seconds) && seconds > 0 ? seconds : 0);
+    });
+  });
+}
+
+async function downloadHlsFile(url, filePath, options = {}) {
   const {
     ffmpegPath = "ffmpeg",
     spawnFn = spawn,
     onProgress = null,
     verbose = false,
+    ownBar = false,
   } = options;
 
-  return new Promise((resolve, reject) => {
-    ensureDirectoryExists(path.dirname(filePath));
+  ensureDirectoryExists(path.dirname(filePath));
 
+  // Total duration lets us turn ffmpeg's time-based progress into a real
+  // percentage. 0 means unknown → indeterminate bar.
+  const durationSec = await probeHlsDuration(url, { ffmpegPath, spawnFn });
+
+  const label = path.basename(filePath);
+  const bar = ownBar
+    ? new cliProgress.SingleBar(
+        { format: formatProgressBar, hideCursor: true, clearOnComplete: false, stopOnComplete: true },
+        cliProgress.Presets.shades_classic
+      )
+    : null;
+  if (bar) {
+    bar.start(durationSec > 0 ? Math.ceil(durationSec) : 1, 0, {
+      name: label,
+      unit: "time",
+      indeterminate: durationSec <= 0,
+      rawValue: 0,
+    });
+  }
+
+  // Single sink for progress: updates our own bar (if any) and forwards to any
+  // upstream collector (the parallel MultiBar).
+  const emit = (payload) => {
+    if (bar) {
+      if (payload.final) {
+        bar.setTotal(bar.getTotal() || 1);
+        bar.update(bar.getTotal(), { name: label, unit: "time", indeterminate: false });
+      } else if (durationSec > 0) {
+        bar.setTotal(Math.ceil(durationSec));
+        bar.update(Math.floor(payload.downloaded), { name: label, unit: "time", indeterminate: false, rawValue: payload.downloaded });
+      } else {
+        bar.update(0, { name: label, unit: "time", indeterminate: true, rawValue: payload.downloaded });
+      }
+    }
+    if (onProgress) onProgress(payload);
+  };
+
+  return new Promise((resolve, reject) => {
     const args = [
       "-hide_banner",
-      "-loglevel",
-      "error",
+      "-loglevel", "error",
+      // Resilience: HLS is hundreds of small segments; a flaky one shouldn't
+      // abort the whole download. Reconnect on transient network errors.
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "5",
+      // Speed: reuse connections and allow multiple in-flight segment requests
+      // so we don't idle waiting on per-segment latency (the main HLS slowdown).
+      "-http_multiple", "1",
+      "-http_persistent", "1",
       "-y",
-      "-i",
-      url,
-      "-c",
-      "copy",
-      "-movflags",
-      "+faststart",
+      "-i", url,
+      "-c", "copy",
+      "-movflags", "+faststart",
+      // Structured, machine-readable progress on stdout instead of parsing the
+      // human stderr. Emits key=value lines including out_time_us.
+      "-progress", "pipe:1",
+      "-nostats",
       filePath,
     ];
 
     const child = spawnFn(ffmpegPath, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stderr = "";
+    let progressBuf = "";
 
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-      if (onProgress) {
-        const match = /time=(\d+:\d+:\d+\.\d+)/.exec(stderr);
-        if (match) {
-          onProgress({ filePath, downloaded: 0, total: 0, percent: 0, final: false, raw: match[1] });
+    child.stdout.on("data", (chunk) => {
+      progressBuf += String(chunk);
+
+      // ffmpeg reports microseconds of media processed so far.
+      let match;
+      const re = /out_time_us=(\d+)/g;
+      let lastUs = null;
+      while ((match = re.exec(progressBuf)) !== null) {
+        lastUs = Number.parseInt(match[1], 10);
+      }
+      // Keep only the tail to bound memory on long downloads.
+      if (progressBuf.length > 4096) progressBuf = progressBuf.slice(-4096);
+
+      if (lastUs != null && Number.isFinite(lastUs)) {
+        const seconds = lastUs / 1e6;
+        if (durationSec > 0) {
+          const percent = Math.max(0, Math.min(100, (seconds / durationSec) * 100));
+          emit({ filePath, downloaded: seconds, total: durationSec, percent, final: false, unit: "time" });
+        } else {
+          // Unknown duration: report elapsed media time so the bar shows motion.
+          emit({ filePath, downloaded: seconds, total: 0, percent: 0, final: false, unit: "time" });
         }
       }
     });
 
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+
     child.on("error", (error) => {
+      if (bar) bar.stop();
       // The most common failure is FFmpeg not being installed/on PATH. Turn the
       // cryptic ENOENT into an actionable message instead of leaking it raw.
       if (error && error.code === "ENOENT") {
@@ -185,20 +303,21 @@ function downloadHlsFile(url, filePath, options = {}) {
 
     child.on("close", (code) => {
       if (code !== 0) {
+        if (bar) bar.stop();
         reject(new Error(`FFmpeg falló al procesar el stream HLS: ${stderr.trim() || "sin detalle"}`));
         return;
       }
 
       try {
         const result = validateDownloadedFile(filePath);
-        if (onProgress) {
-          onProgress({ filePath, downloaded: result.size, total: result.size, percent: 100, final: true });
-        }
+        emit({ filePath, downloaded: result.size, total: result.size, percent: 100, final: true });
+        if (bar) bar.stop();
         if (!verbose) {
           console.log(`Archivo listo: ${result.filePath} (${formatBytes(result.size)})`);
         }
         resolve(result.filePath);
       } catch (error) {
+        if (bar) bar.stop();
         reject(error);
       }
     });
@@ -345,14 +464,18 @@ async function downloadEpisodesInParallel({
           // onProgress drives only the visual bar. Counting happens once, below,
           // when the episode promise settles, so totals stay deterministic even
           // if onProgress never fires (e.g. HLS via FFmpeg reports no bytes).
-          onProgress: ({ downloaded, total: totalSize, percent, final = false }) => {
+          onProgress: ({ downloaded, total: totalSize, percent, final = false, unit }) => {
             if (!bar) return;
+            const isTime = unit === "time";
             bar.payload.rawValue = downloaded || 0;
-            if (totalSize > 0) {
-              bar.setTotal(totalSize);
-              bar.update(final ? totalSize : downloaded, { name, indeterminate: false });
-            } else {
-              bar.update(0, { name, indeterminate: true, rawValue: downloaded || 0 });
+            // For HLS (unit "time") the final event carries bytes as total, which
+            // would corrupt a time-based bar; ignore total on the final tick and
+            // just close the bar out in the success branch below.
+            if (totalSize > 0 && !(isTime && final)) {
+              bar.setTotal(Math.ceil(totalSize));
+              bar.update(Math.floor(final ? totalSize : downloaded), { name, unit, indeterminate: false });
+            } else if (!final) {
+              bar.update(0, { name, unit, indeterminate: true, rawValue: downloaded || 0 });
             }
           },
         });
