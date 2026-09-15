@@ -6,7 +6,7 @@ CLI para descargar episodios de anime desde JKAnime.
 
 - Node.js 18 o superior (usa `fetch` y streams web nativos)
 - Yarn (se usa como gestor de dependencias por defecto)
-- FFmpeg (opcional, solo para episodios en formato HLS `.m3u8`)
+- FFmpeg + ffprobe (opcional, solo para episodios en formato HLS `.m3u8`)
 
 ## Instalación
 
@@ -79,13 +79,21 @@ yarn download -- --anime dr-stone --episode 3-6
 - Si no se indica `-f`, se usa automáticamente `animes/<slug>`.
 - Si se especifica una ruta manual, esa ruta se respetará exactamente.
 - Los archivos se guardan con el formato `NOMBRE_ANIME-EPISODIO.mp4`.
-- Al descargar un rango o `all`, un episodio que falle no detiene el resto: los fallos se listan al final en el resumen.
+- Cuando un episodio ofrece MP4 directo, uwujacker lo prefiere y lo descarga sin FFmpeg.
+- Al descargar un rango o `all`, un episodio que falle no detiene el resto: los fallos se listan al final en el resumen, con una barra de progreso por episodio.
 - Si la web de JKAnime cambia su HTML o su API, puede requerir ajuste de selectores.
 - La salida por consola está diseñada para ser compatible con CMD y PowerShell.
 
 ## FFmpeg (episodios HLS)
 
-Algunos episodios se sirven como streams HLS (`.m3u8`). Para esos casos se necesita **FFmpeg** instalado y accesible en el `PATH`. Si falta, uwujacker lo indica con un mensaje claro. Descárgalo desde [ffmpeg.org](https://ffmpeg.org/download.html). Los episodios servidos como archivo directo (`mp4`, `mkv`, `webm`) no requieren FFmpeg.
+La mayoría de episodios se descargan como MP4 directo y **no** requieren FFmpeg. Solo hace falta para episodios que únicamente se ofrecen como stream HLS (`.m3u8`): en ese caso, uwujacker descarga los segmentos en paralelo y usa FFmpeg para unirlos en el `.mp4` final.
+
+Para esos episodios necesitas **FFmpeg** (con `ffprobe`, que viene incluido) instalado y accesible en el `PATH`. Si falta, uwujacker lo indica con un mensaje claro. Instalación:
+
+- macOS: `brew install ffmpeg`
+- Windows / Linux: descárgalo desde [ffmpeg.org](https://ffmpeg.org/download.html)
+
+Comprueba que quedó disponible con `ffmpeg -version`.
 
 ## Tests
 

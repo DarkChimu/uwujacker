@@ -44,16 +44,31 @@ uwujacker --search "Dragon Ball" -e 1
 
 Esto resuelve el slug correcto antes de descargar.
 
-## Episodios HLS y FFmpeg
+## MP4 directo vs HLS
 
-Cuando un episodio se sirve como stream HLS (`.m3u8`), uwujacker usa FFmpeg para
-generar el `.mp4` final. FFmpeg debe estar instalado y en el `PATH`; si falta, el
-programa lo avisa con un mensaje claro. Descárgalo desde
-[ffmpeg.org](https://ffmpeg.org/download.html). Los episodios en `mp4`/`mkv`/`webm`
-directos no lo necesitan.
+uwujacker prefiere el servidor que ofrece un MP4 directo, así que la mayoría de
+episodios se descargan sin FFmpeg y muestran una barra de progreso normal.
+
+Cuando un episodio solo está disponible como stream HLS (`.m3u8`), uwujacker
+descarga los segmentos `.ts` en paralelo y usa FFmpeg para unirlos en el `.mp4`
+final. La barra muestra el avance real (por tiempo o por segmentos), no un salto
+de 0 a 100.
+
+### FFmpeg (solo para HLS)
+
+Los episodios HLS requieren **FFmpeg** (incluye `ffprobe`) en el `PATH`. Si falta,
+el programa lo avisa con un mensaje claro.
+
+```bash
+# macOS
+brew install ffmpeg
+# Windows / Linux: https://ffmpeg.org/download.html
+ffmpeg -version   # verificar
+```
 
 ## Descargas en lote tolerantes a fallos
 
-En descargas de rango o `all`, si un episodio falla el resto continúa. Al terminar
-se muestra un resumen con el total completado, los OK, los errores y la lista de
-episodios que fallaron.
+En descargas de rango o `all`, si un episodio falla el resto continúa. Cada
+episodio muestra su propia barra de progreso y, al terminar, se muestra un
+resumen con el total completado, los OK, los errores y la lista de episodios que
+fallaron.
