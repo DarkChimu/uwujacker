@@ -574,9 +574,11 @@ test("downloadSegments descarga en paralelo respetando la concurrencia y el orde
     maxActive = Math.max(maxActive, active);
     await new Promise((r) => setTimeout(r, 10));
     active -= 1;
-    const bytes = Buffer.from(`data-${url}`);
+    // Byte de sincronización MPEG-TS (0x47) al inicio, como un .ts real.
+    const bytes = Buffer.concat([Buffer.from([0x47]), Buffer.from(`data-${url}`)]);
     return {
       ok: true,
+      headers: { get: () => "video/mp2t" },
       body: require("node:stream").Readable.toWeb(require("node:stream").Readable.from([bytes])),
     };
   };
@@ -594,4 +596,23 @@ test("downloadSegments descarga en paralelo respetando la concurrencia y el orde
     const f = path.join(dir, `seg-${String(i).padStart(6, "0")}.ts`);
     assert.ok(fs.existsSync(f), `falta ${f}`);
   }
+});
+
+test("downloadSegments rechaza páginas de error del CDN (no son MPEG-TS)", async () => {
+  const dir = path.resolve("./tmp/segs-bad");
+  fs.mkdirSync(dir, { recursive: true });
+
+  // El CDN responde 200 pero con HTML de error en vez del .ts.
+  const fetchFn = async () => ({
+    ok: true,
+    headers: { get: (h) => (h === "content-type" ? "text/html" : "") },
+    body: require("node:stream").Readable.toWeb(
+      require("node:stream").Readable.from([Buffer.from("<html>error</html>")])
+    ),
+  });
+
+  await assert.rejects(
+    () => downloadSegments(["https://cdn/seg0.ts"], dir, { fetchFn }),
+    /segmento falló/
+  );
 });

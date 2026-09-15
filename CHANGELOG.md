@@ -4,6 +4,7 @@
 
 ### Added
 - Descarga paralela de segmentos HLS: los `.ts` se bajan concurrentemente con `fetch` y FFmpeg solo hace el mux final. En pruebas reales, un episodio de ~24 min pasó de varios minutos a menos de un minuto.
+- Validación de segmentos HLS: se rechazan respuestas que no son video (páginas de error HTML/JSON del CDN o datos que no empiezan con el byte de sincronización MPEG-TS `0x47`), evitando archivos corruptos.
 - Progreso real durante descargas HLS: se consulta la duración con `ffprobe` y se muestra el avance por tiempo/segmentos, en lugar de saltar de 0 a 100 %.
 - Barras de progreso con `cli-progress` (una barra por episodio en descargas paralelas), con modo indeterminado cuando el servidor no informa el tamaño.
 - Mensaje claro cuando falta FFmpeg (con enlace de instalación) en lugar de un error críptico.
@@ -14,6 +15,10 @@
 - HTTP migrado a `fetch` nativo (Node 18+); se eliminó la dependencia `axios`.
 - Descargas en lote tolerantes a fallos: un episodio que falla ya no aborta el resto; se listan los fallidos en el resumen.
 - Unificado el parseo de argumentos y la capa de scraping (menos código duplicado).
+
+### Fixed
+- Corregida la unión de segmentos HLS que producía un archivo diminuto e inservible: ahora se concatenan en orden mediante un único flujo y el archivo se cierra por completo antes del mux.
+- Eliminado el `MaxListenersExceededWarning` que aparecía al unir muchos segmentos.
 
 ### Removed
 - Dependencias sin uso: `adm-zip`, `cloudscraper`, `request`, `axios` y `progress`. El proyecto depende ahora solo de `cheerio`, `yargs` y `cli-progress`.

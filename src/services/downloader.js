@@ -223,18 +223,38 @@ async function downloadSegments(segmentUrls, dir, { concurrency = 8, onSegmentDo
   let done = 0;
 
   const fetchSegment = async (url, dest) => {
+    let lastError;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const res = await fetchFn(url, { redirect: "follow" });
         if (!res.ok || !res.body) throw new Error(`estado ${res.status}`);
+
+        // A CDN may answer 200 with a tiny HTML/JSON error page instead of the
+        // .ts (expired token, rate limit). Reject by content-type so we don't
+        // concatenate garbage into the final video.
+        const ctype = (res.headers.get && res.headers.get("content-type")) || "";
+        if (/text\/html|application\/json/i.test(ctype)) {
+          throw new Error(`respuesta no es video (content-type: ${ctype})`);
+        }
+
         await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(dest));
+
         const size = fs.statSync(dest).size;
         if (size <= 0) throw new Error("segmento vacío");
+        // MPEG-TS packets start with the sync byte 0x47. If the first byte is
+        // not 0x47 the payload isn't a TS segment (likely an error page).
+        const fd = fs.openSync(dest, "r");
+        const head = Buffer.alloc(1);
+        fs.readSync(fd, head, 0, 1, 0);
+        fs.closeSync(fd);
+        if (head[0] !== 0x47) throw new Error("no es un segmento MPEG-TS válido");
+
         return;
       } catch (error) {
-        if (attempt === 2) throw new Error(`segmento falló (${url}): ${error.message}`);
+        lastError = error;
       }
     }
+    throw new Error(`segmento falló (${url}): ${lastError ? lastError.message : "desconocido"}`);
   };
 
   const worker = async () => {
@@ -280,13 +300,19 @@ async function downloadHlsParallel(url, filePath, options = {}) {
       },
     });
 
-    // Concatenate .ts bytes in order. Concatenated MPEG-TS is itself valid TS.
+    // Concatenate .ts bytes in order into a single MPEG-TS. A single pipeline
+    // driven by an async generator streams every segment through one writable,
+    // which avoids attaching per-iteration close/finish listeners (the earlier
+    // "MaxListenersExceededWarning") and guarantees the file is fully flushed
+    // and closed before we mux.
     ensureDirectoryExists(path.dirname(combined));
-    const out = fs.createWriteStream(combined);
-    for (let i = 0; i < segments.length; i += 1) {
-      const seg = path.join(tmpDir, `seg-${String(i).padStart(6, "0")}.ts`);
-      await pipeline(fs.createReadStream(seg), out, { end: i === segments.length - 1 });
+    async function* concatSegments() {
+      for (let i = 0; i < segments.length; i += 1) {
+        const seg = path.join(tmpDir, `seg-${String(i).padStart(6, "0")}.ts`);
+        yield* fs.createReadStream(seg);
+      }
     }
+    await pipeline(concatSegments(), fs.createWriteStream(combined));
 
     // Remux the combined TS into mp4 (fast copy, no re-encode).
     ensureDirectoryExists(path.dirname(filePath));
