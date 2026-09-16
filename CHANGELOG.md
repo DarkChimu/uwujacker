@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.1] - 2026-09-16
+
+### Fixed
+- Corregida la detección del número de episodios en `-e all`: antes contaba números no relacionados del HTML y planificaba episodios inexistentes (p. ej. 50+ para una serie de 13). Ahora se detecta el último episodio real comprobando su existencia página por página (búsqueda exponencial + binaria, O(log n) peticiones).
+- Corregido el render del progreso en descargas en lote: solo se muestran las barras de las descargas activas (según la concurrencia); al terminar cada episodio se libera su barra y se registra el resultado, evitando que un bloque de decenas de barras desborde el alto del terminal y se repita en cada refresco.
+
 ## [1.1.0] - 2026-09-15
 
 ### Added

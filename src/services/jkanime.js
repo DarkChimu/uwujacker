@@ -324,30 +324,56 @@ function extractLastChapterFromHtml(html) {
   return Number.isFinite(value) && value > 0 ? value : 1;
 }
 
-async function resolveEpisodePlan({ animeSlug, baseUrl = DEFAULT_BASE_URL, requestFn = makeRequest } = {}) {
+// True if the episode page exists. JKAnime serves a real episode (with a player)
+// at /<slug>/<n>/ and a 404 page otherwise, so status + a player marker is a
+// reliable existence check — far more robust than scraping episode counts from
+// HTML that is full of unrelated numbers (which made a 13-ep show plan 50+).
+async function episodeExists(animeSlug, episode, { baseUrl = DEFAULT_BASE_URL, requestFn = makeRequest } = {}) {
+  try {
+    const res = await requestFn(`${baseUrl}/${animeSlug}/${episode}/`, {
+      retries: 0,
+      validateStatus: (status) => status >= 200 && status < 600,
+    });
+    if (res.status && res.status >= 400) return false;
+    return /jkplayer\//i.test(res.body || "");
+  } catch (error) {
+    return false;
+  }
+}
+
+// Discovers how many episodes an anime has by probing for the last existing one:
+// exponential search to bracket an upper bound, then binary search for the exact
+// edge. This is O(log n) requests and doesn't rely on fragile HTML parsing.
+async function resolveEpisodePlan({ animeSlug, baseUrl = DEFAULT_BASE_URL, requestFn = makeRequest, maxEpisodes = 2000 } = {}) {
   if (!animeSlug) {
     return [1];
   }
 
-  const animeUrl = `${baseUrl}/${animeSlug}/`;
+  const exists = (ep) => episodeExists(animeSlug, ep, { baseUrl, requestFn });
 
-  try {
-    const page = await requestFn(animeUrl, { retries: 1 });
-    const matches = [...(page.body || "").matchAll(/(?:href|src)=["']\/?(?:[^"']+\/)?(?:[a-z0-9-]+)\/([0-9]+)\/?["']/gi)];
-    const numbers = matches
-      .map((match) => Number.parseInt(match[1], 10))
-      .filter((value) => Number.isFinite(value) && value > 0)
-      .sort((left, right) => left - right);
-
-    if (numbers.length) {
-      const maxEpisode = numbers[numbers.length - 1];
-      return Array.from({ length: maxEpisode }, (_, index) => index + 1);
-    }
-  } catch (error) {
-    // Fallback to a safe range when the site blocks or the slug is unavailable.
+  // If episode 1 isn't reachable (site blocked, bad slug), fall back to [1].
+  if (!(await exists(1))) {
+    return [1];
   }
 
-  return [1];
+  // Exponential search: find the first non-existing episode.
+  let lastKnown = 1;
+  let probe = 2;
+  while (probe <= maxEpisodes && (await exists(probe))) {
+    lastKnown = probe;
+    probe *= 2;
+  }
+
+  // Binary search between lastKnown (exists) and min(probe, maxEpisodes) (missing).
+  let low = lastKnown;
+  let high = Math.min(probe, maxEpisodes + 1);
+  while (high - low > 1) {
+    const mid = Math.floor((low + high) / 2);
+    if (await exists(mid)) low = mid;
+    else high = mid;
+  }
+
+  return Array.from({ length: low }, (_, index) => index + 1);
 }
 
 module.exports = {
@@ -363,4 +389,5 @@ module.exports = {
   searchAnimeByQuery,
   resolveAnimeSlug,
   resolveEpisodePlan,
+  episodeExists,
 };

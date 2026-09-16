@@ -647,20 +647,27 @@ async function downloadEpisodesInParallel({
           },
         });
 
-        if (bar) {
-          const finalTotal = bar.getTotal() || 1;
-          bar.setTotal(finalTotal);
-          bar.update(finalTotal, { name: `${name} ✓`, indeterminate: false });
-        }
         completed += 1;
         successCount += 1;
         results.push(filePath);
+        // Free the bar so only the ~concurrency active downloads stay on screen;
+        // otherwise a long series would render dozens of lines that overflow the
+        // terminal height and "smear" on each redraw. Report the result above.
+        if (bar) {
+          multibar.remove(bar);
+          bars.delete(episodeKey);
+          multibar.log(`${name} ✓ completado\n`);
+        }
       } catch (error) {
         // A single failing episode must not abort the rest of the batch.
         completed += 1;
         errorCount += 1;
         failures.push({ episode: episodeKey, error: error.message || String(error) });
-        if (bar) bar.update(0, { name: `${name} ✗` });
+        if (bar) {
+          multibar.remove(bar);
+          bars.delete(episodeKey);
+          multibar.log(`${name} ✗ falló\n`);
+        }
         if (verbose) {
           console.warn(`Episodio ${episode} falló: ${error.message || error}`);
         }

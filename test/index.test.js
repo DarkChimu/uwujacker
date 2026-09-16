@@ -25,6 +25,7 @@ const {
   resolveAnimeSlug,
 } = require("../index.js");
 const { formatProgressBar, downloadFile, parseM3u8, downloadSegments } = require("../src/services/downloader");
+const { resolveEpisodePlan } = require("../src/services/jkanime");
 const { buildEpisodeFileName } = require("../src/utils/files");
 
 test("parseArgs lee anime, episodio y carpeta", () => {
@@ -369,6 +370,32 @@ test("resolveAnimeSlug convierte un nombre legible en el slug correcto", async (
   });
 
   assert.equal(slug, "dragon-ball");
+});
+
+test("resolveEpisodePlan detecta el último episodio real por existencia (13, no 50+)", async () => {
+  const TOTAL = 13;
+  let calls = 0;
+  // Simula JKAnime: episodios <= TOTAL dan 200 con player; el resto, 404.
+  const requestFn = async (url) => {
+    calls += 1;
+    const ep = Number(url.match(/\/(\d+)\/$/)[1]);
+    if (ep <= TOTAL) return { status: 200, body: "<iframe src='https://jkanime.net/jkplayer/jk?u=x'></iframe>" };
+    return { status: 404, body: "Página no encontrada" };
+  };
+
+  const plan = await resolveEpisodePlan({ animeSlug: "uma-musume-pretty-derby-tv", requestFn });
+
+  assert.equal(plan.length, TOTAL);
+  assert.equal(plan[0], 1);
+  assert.equal(plan[plan.length - 1], TOTAL);
+  // Búsqueda exponencial + binaria: muchas menos peticiones que probar 1..N.
+  assert.ok(calls < TOTAL, `debe ser O(log n): ${calls} peticiones`);
+});
+
+test("resolveEpisodePlan devuelve [1] si el episodio 1 no existe", async () => {
+  const requestFn = async () => ({ status: 404, body: "Página no encontrada" });
+  const plan = await resolveEpisodePlan({ animeSlug: "no-existe", requestFn });
+  assert.deepEqual(plan, [1]);
 });
 
 test("formatProgressBar muestra porcentaje y tamaños cuando se conoce el total", () => {
