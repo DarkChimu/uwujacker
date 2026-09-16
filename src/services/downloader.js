@@ -597,9 +597,13 @@ async function downloadEpisodesInParallel({
   // non-verbose terminal — verbose mode logs interleave and would corrupt bars,
   // and a non-TTY (piped/redirected) gets a plain summary at the end.
   const useBars = isInteractive() && !verbose && pendingEpisodes.length > 0;
+  // clearOnComplete: true hace que cada barra desaparezca al terminar en vez de
+  // quedar "congelada" al 100% (lo que en Windows/PowerShell dejaba la barra Y
+  // la línea de resultado, duplicando el episodio). El resultado definitivo se
+  // imprime con multibar.log().
   const multibar = useBars
     ? new cliProgress.MultiBar(
-        { format: formatProgressBar, hideCursor: true, clearOnComplete: false, autopadding: true, forceRedraw: true },
+        { format: formatProgressBar, hideCursor: true, clearOnComplete: true, autopadding: true, forceRedraw: true },
         cliProgress.Presets.shades_classic
       )
     : null;
@@ -650,13 +654,14 @@ async function downloadEpisodesInParallel({
         completed += 1;
         successCount += 1;
         results.push(filePath);
-        // Free the bar so only the ~concurrency active downloads stay on screen;
-        // otherwise a long series would render dozens of lines that overflow the
-        // terminal height and "smear" on each redraw. Report the result above.
+        // Remove the bar so only the ~concurrency active downloads stay on
+        // screen. We don't print a per-episode line here: mixing permanent log
+        // lines with live bars renders inconsistently across terminals
+        // (notably PowerShell), leaving a "frozen" bar next to the message. The
+        // final summary is the single source of truth for what completed.
         if (bar) {
           multibar.remove(bar);
           bars.delete(episodeKey);
-          multibar.log(`${name} ✓ completado\n`);
         }
       } catch (error) {
         // A single failing episode must not abort the rest of the batch.
@@ -666,7 +671,6 @@ async function downloadEpisodesInParallel({
         if (bar) {
           multibar.remove(bar);
           bars.delete(episodeKey);
-          multibar.log(`${name} ✗ falló\n`);
         }
         if (verbose) {
           console.warn(`Episodio ${episode} falló: ${error.message || error}`);

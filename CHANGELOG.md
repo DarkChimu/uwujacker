@@ -4,7 +4,7 @@
 
 ### Fixed
 - Corregida la detección del número de episodios en `-e all`: antes contaba números no relacionados del HTML y planificaba episodios inexistentes (p. ej. 50+ para una serie de 13). Ahora se detecta el último episodio real comprobando su existencia página por página (búsqueda exponencial + binaria, O(log n) peticiones).
-- Corregido el render del progreso en descargas en lote: solo se muestran las barras de las descargas activas (según la concurrencia); al terminar cada episodio se libera su barra y se registra el resultado, evitando que un bloque de decenas de barras desborde el alto del terminal y se repita en cada refresco.
+- Corregido el render del progreso en descargas en lote: solo se muestran las barras de las descargas activas (según la concurrencia), evitando que un bloque de decenas de barras desborde el alto del terminal. Las barras se limpian al completarse y el resumen final es el único registro de resultados, evitando líneas duplicadas ("barra congelada" + mensaje) que aparecían en Windows/PowerShell.
 
 ## [1.1.0] - 2026-09-15
 
