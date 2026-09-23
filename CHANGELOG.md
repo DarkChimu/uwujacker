@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0] - 2026-09-23
+
+### Added
+- Selección interactiva del anime en `--search`: cuando la búsqueda devuelve varias coincidencias (ediciones, temporadas o variantes del nombre) se muestra un menú navegable con las flechas ↑/↓ (o `k`/`j`) que resalta la opción actual; se confirma con Enter/Espacio y se cancela con Esc/`q`. Muestra solo el título del anime. Con una única coincidencia se selecciona automáticamente y en entornos no interactivos (pipe/CI) se usa una lista numerada o la primera coincidencia. No aplica a `-a/--anime`. Sin dependencias nuevas (raw-mode stdin + `readline`).
+
+### Fixed
+- Corregida la búsqueda (`ajax_search` devolvía 419 "Page Expired"): JKAnime movió el token CSRF al `<meta name="csrf-token">` y lo valida contra la cookie de sesión. Ahora el token se lee del meta (con fallbacks) y la cookie del home se reenvía en la petición, así que la búsqueda vuelve a devolver todas las coincidencias en lugar de caer al slug normalizado (p. ej. `uma musume` mostraba solo `uma-musume`).
+
 ## [1.1.1] - 2026-09-16
 
 ### Fixed
