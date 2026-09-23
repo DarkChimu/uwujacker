@@ -670,6 +670,7 @@ test("downloadSegments rechaza páginas de error del CDN (no son MPEG-TS)", asyn
 });
 
 const { promptSelection, resolveSlugFromSearch } = require("../index.js");
+const { episodeSpecFromArgs, parseEpisodeAnswer, folderForSlug } = require("../src/cli");
 const { PassThrough } = require("node:stream");
 
 // Construye streams input/output falsos para pilotar readline sin un TTY real.
@@ -693,7 +694,7 @@ function fakeIO(keystrokes) {
   return { input, output, getOutput: () => out };
 }
 
-test("promptSelection devuelve el item elegido por índice", async () => {
+test("promptSelection (fallback) devuelve un array con el item elegido por índice", async () => {
   const items = [
     { slug: "one-a", title: "Uno A" },
     { slug: "two-b", title: "Dos B" },
@@ -701,17 +702,17 @@ test("promptSelection devuelve el item elegido por índice", async () => {
   ];
   const { input, output } = fakeIO(["2"]);
   const chosen = await promptSelection(items, { input, output });
-  assert.equal(chosen.slug, "two-b");
+  assert.deepEqual(chosen.map((c) => c.slug), ["two-b"]);
 });
 
-test("promptSelection reintenta ante entrada inválida y luego acepta una válida", async () => {
+test("promptSelection (fallback) reintenta ante entrada inválida y luego acepta una válida", async () => {
   const items = [
     { slug: "one-a", title: "Uno A" },
     { slug: "two-b", title: "Dos B" },
   ];
   const { input, output, getOutput } = fakeIO(["99", "abc", "1"]);
   const chosen = await promptSelection(items, { input, output });
-  assert.equal(chosen.slug, "one-a");
+  assert.deepEqual(chosen.map((c) => c.slug), ["one-a"]);
   assert.match(getOutput(), /no válida/i);
 });
 
@@ -750,16 +751,38 @@ function fakeRawTty(sequences) {
 
 const KEY = { up: "\u001b[A", down: "\u001b[B", enter: "\r", esc: "\u001b" };
 
-test("promptSelection (flechas) baja con ↓ y confirma con Enter", async () => {
+const KEY_SPACE = " ";
+
+test("promptSelection (flechas) sin marcar toma la fila resaltada al pulsar Enter", async () => {
   const items = [
     { slug: "one-a", title: "Uno A" },
     { slug: "two-b", title: "Dos B" },
     { slug: "three-c", title: "Tres C" },
   ];
-  // Empieza en el índice 0; dos ↓ -> índice 2; Enter confirma.
+  // Empieza en el índice 0; dos ↓ -> índice 2; Enter sin marcar -> [ese].
   const { input, output } = fakeRawTty([KEY.down, KEY.down, KEY.enter]);
   const chosen = await promptSelection(items, { input, output });
-  assert.equal(chosen.slug, "three-c");
+  assert.deepEqual(chosen.map((c) => c.slug), ["three-c"]);
+});
+
+test("promptSelection (flechas) marca varios con Espacio y confirma con Enter", async () => {
+  const items = [
+    { slug: "one-a", title: "Uno A" },
+    { slug: "two-b", title: "Dos B" },
+    { slug: "three-c", title: "Tres C" },
+  ];
+  // Marca índice 0, baja al 2, lo marca, Enter -> [0, 2].
+  const { input, output } = fakeRawTty([KEY_SPACE, KEY.down, KEY.down, KEY_SPACE, KEY.enter]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.deepEqual(chosen.map((c) => c.slug), ["one-a", "three-c"]);
+});
+
+test("promptSelection (flechas) desmarca al pulsar Espacio dos veces", async () => {
+  const items = [{ slug: "one-a", title: "Uno A" }, { slug: "two-b", title: "Dos B" }];
+  // Marca 0, lo desmarca, baja al 1, lo marca, Enter -> [1].
+  const { input, output } = fakeRawTty([KEY_SPACE, KEY_SPACE, KEY.down, KEY_SPACE, KEY.enter]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.deepEqual(chosen.map((c) => c.slug), ["two-b"]);
 });
 
 test("promptSelection (flechas) envuelve hacia arriba y cancela con Esc", async () => {
@@ -770,38 +793,99 @@ test("promptSelection (flechas) envuelve hacia arriba y cancela con Esc", async 
 });
 
 test("resolveSlugFromSearch auto-selecciona cuando hay un solo resultado", async () => {
-  const slug = await resolveSlugFromSearch("cualquier", {
+  const slugs = await resolveSlugFromSearch("cualquier", {
     searchFn: async () => [{ slug: "solo-uno", title: "Solo Uno" }],
   });
-  assert.equal(slug, "solo-uno");
+  assert.deepEqual(slugs, ["solo-uno"]);
 });
 
 test("resolveSlugFromSearch normaliza la query cuando no hay resultados", async () => {
-  const slug = await resolveSlugFromSearch("Dragon Ball Z", {
+  const slugs = await resolveSlugFromSearch("Dragon Ball Z", {
     searchFn: async () => [],
   });
-  assert.equal(slug, "dragon-ball-z");
+  assert.deepEqual(slugs, ["dragon-ball-z"]);
 });
 
 test("resolveSlugFromSearch toma la primera coincidencia si no es interactivo", async () => {
-  const slug = await resolveSlugFromSearch("dragon", {
+  const slugs = await resolveSlugFromSearch("dragon", {
     searchFn: async () => [
       { slug: "dragon-ball", title: "Dragon Ball" },
       { slug: "dragon-ball-super", title: "Dragon Ball Super" },
     ],
     isInteractive: () => false,
   });
-  assert.equal(slug, "dragon-ball");
+  assert.deepEqual(slugs, ["dragon-ball"]);
 });
 
-test("resolveSlugFromSearch usa la selección del usuario cuando es interactivo", async () => {
-  const slug = await resolveSlugFromSearch("dragon", {
+test("resolveSlugFromSearch devuelve varios slugs cuando el usuario marca varios", async () => {
+  const slugs = await resolveSlugFromSearch("dragon", {
     searchFn: async () => [
       { slug: "dragon-ball", title: "Dragon Ball" },
       { slug: "dragon-ball-super", title: "Dragon Ball Super" },
+      { slug: "dragon-ball-z", title: "Dragon Ball Z" },
     ],
     isInteractive: () => true,
-    promptFn: async (results) => results[1],
+    promptFn: async (results) => [results[0], results[2]],
   });
-  assert.equal(slug, "dragon-ball-super");
+  assert.deepEqual(slugs, ["dragon-ball", "dragon-ball-z"]);
+});
+
+test("resolveSlugFromSearch lanza error si se cancela la selección", async () => {
+  await assert.rejects(
+    () =>
+      resolveSlugFromSearch("dragon", {
+        searchFn: async () => [
+          { slug: "dragon-ball", title: "Dragon Ball" },
+          { slug: "dragon-ball-super", title: "Dragon Ball Super" },
+        ],
+        isInteractive: () => true,
+        promptFn: async () => null,
+      }),
+    /cancelada/i
+  );
+});
+
+test("episodeSpecFromArgs: -e all -> 'all'", () => {
+  assert.equal(episodeSpecFromArgs({ episode: "all" }), "all");
+});
+
+test("episodeSpecFromArgs: rango en -e -> array de episodios", () => {
+  assert.deepEqual(episodeSpecFromArgs({ episode: "3-6" }), [3, 4, 5, 6]);
+});
+
+test("episodeSpecFromArgs: lista en -r -> array de episodios", () => {
+  assert.deepEqual(episodeSpecFromArgs({ range: "1,3,5" }), [1, 3, 5]);
+});
+
+test("episodeSpecFromArgs: -e numérico explícito -> ese número", () => {
+  assert.equal(episodeSpecFromArgs({ episode: "7" }), 7);
+});
+
+test("episodeSpecFromArgs: sin -e explícito (default '1') -> null para preguntar", () => {
+  assert.equal(episodeSpecFromArgs({ episode: "1" }), null);
+});
+
+test("parseEpisodeAnswer interpreta la respuesta como el flag -e", () => {
+  assert.equal(parseEpisodeAnswer("all"), "all");
+  assert.equal(parseEpisodeAnswer(""), "all");
+  assert.deepEqual(parseEpisodeAnswer("2-4"), [2, 3, 4]);
+  assert.deepEqual(parseEpisodeAnswer("1,4"), [1, 4]);
+  // Un solo número llega como lista [5] (parseEpisodeSelection ya normaliza a array).
+  assert.deepEqual(parseEpisodeAnswer("5"), [5]);
+});
+
+test("folderForSlug: sin --folder usa animes/<slug>", () => {
+  const p = folderForSlug("uma-musume", { folder: null, multiple: false });
+  assert.match(p, /animes[/\\]uma-musume$/);
+});
+
+test("folderForSlug: con --folder y un solo anime usa la carpeta tal cual", () => {
+  const p = folderForSlug("uma-musume", { folder: "./descargas", multiple: false });
+  assert.match(p, /descargas$/);
+  assert.doesNotMatch(p, /uma-musume$/);
+});
+
+test("folderForSlug: con --folder y varios animes anida <folder>/<slug>", () => {
+  const p = folderForSlug("uma-musume", { folder: "./descargas", multiple: true });
+  assert.match(p, /descargas[/\\]uma-musume$/);
 });

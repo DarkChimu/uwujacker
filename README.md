@@ -55,10 +55,13 @@ uwujacker --search "Dragon Ball" -e 1
 ```
 
 Si la búsqueda devuelve varias coincidencias (ediciones, temporadas o variantes
-del nombre), se muestra una lista interactiva: navega con las flechas ↑/↓,
-confirma con Enter (o Espacio) y cancela con Esc. Con una sola coincidencia se
-selecciona automáticamente. En entornos no interactivos (salida por pipe o CI)
-se usa la primera coincidencia.
+del nombre), se muestra una lista interactiva de selección múltiple: navega con
+las flechas ↑/↓, marca/desmarca con Espacio y confirma con Enter; cancela con
+Esc. Puedes elegir varios animes a la vez. Si no indicas `-e/--episode`, tras
+confirmar se te pregunta qué descargar (número, rango `3-6`, lista `1,3,5` o
+`all`) y esa selección se aplica a todos los animes elegidos. Con una sola
+coincidencia se selecciona automáticamente. En entornos no interactivos (salida
+por pipe o CI) se usa la primera coincidencia.
 
 Ejecutar directamente con Yarn:
 
