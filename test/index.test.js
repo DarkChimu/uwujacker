@@ -345,6 +345,31 @@ test("searchAnimeByQuery realiza una búsqueda AJAX y obtiene resultados", async
   assert.equal(results[0].title, "Dr. Stone");
 });
 
+test("searchAnimeByQuery lee el token del meta y reenvía la cookie de sesión", async () => {
+  // Regresión: JKAnime devolvía 419 porque leíamos el token de un <input> que ya
+  // no existe y no reenviábamos la cookie de sesión. Ahora el token viene del
+  // <meta name="csrf-token"> y la cookie del home debe llegar al ajax_search.
+  let sentHeaders = null;
+  const homeRequestFn = async () => ({
+    body: '<meta name="csrf-token" content="tok-42">',
+    cookies: ["XSRF-TOKEN=abc; Path=/; HttpOnly", "jkanime_session=xyz; Path=/"],
+  });
+  const requestFn = async (url, opts = {}) => {
+    if (url.includes("ajax_search")) {
+      sentHeaders = opts.headers;
+      return { body: JSON.stringify([{ slug: "uma-musume-cinderella-gray", title: "Uma Musume: Cinderella Gray" }]) };
+    }
+    throw new Error(`URL inesperada: ${url}`);
+  };
+
+  const results = await searchAnimeByQuery("uma musume", { homeRequestFn, requestFn });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].slug, "uma-musume-cinderella-gray");
+  assert.equal(sentHeaders["X-CSRF-TOKEN"], "tok-42");
+  assert.equal(sentHeaders.Cookie, "XSRF-TOKEN=abc; jkanime_session=xyz");
+});
+
 test("searchAnimeByQuery devuelve resultados de la AJAX search", async () => {
   const results = await searchAnimeByQuery("Dragon", {
     homeRequestFn: async () => ({ body: '<input name="_token" value="abc123">' }),
@@ -642,4 +667,141 @@ test("downloadSegments rechaza páginas de error del CDN (no son MPEG-TS)", asyn
     () => downloadSegments(["https://cdn/seg0.ts"], dir, { fetchFn }),
     /segmento falló/
   );
+});
+
+const { promptSelection, resolveSlugFromSearch } = require("../index.js");
+const { PassThrough } = require("node:stream");
+
+// Construye streams input/output falsos para pilotar readline sin un TTY real.
+// `keystrokes` son las líneas que el "usuario" teclea, en orden.
+function fakeIO(keystrokes) {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let out = "";
+  output.on("data", (chunk) => {
+    out += chunk.toString();
+  });
+  // Emitimos cada respuesta en el siguiente tick para que readline la lea línea a línea.
+  let i = 0;
+  const feedNext = () => {
+    if (i < keystrokes.length) {
+      input.write(`${keystrokes[i++]}\n`);
+      setImmediate(feedNext);
+    }
+  };
+  setImmediate(feedNext);
+  return { input, output, getOutput: () => out };
+}
+
+test("promptSelection devuelve el item elegido por índice", async () => {
+  const items = [
+    { slug: "one-a", title: "Uno A" },
+    { slug: "two-b", title: "Dos B" },
+    { slug: "three-c", title: "Tres C" },
+  ];
+  const { input, output } = fakeIO(["2"]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.equal(chosen.slug, "two-b");
+});
+
+test("promptSelection reintenta ante entrada inválida y luego acepta una válida", async () => {
+  const items = [
+    { slug: "one-a", title: "Uno A" },
+    { slug: "two-b", title: "Dos B" },
+  ];
+  const { input, output, getOutput } = fakeIO(["99", "abc", "1"]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.equal(chosen.slug, "one-a");
+  assert.match(getOutput(), /no válida/i);
+});
+
+test("promptSelection devuelve null si se cancela con 'q'", async () => {
+  const items = [{ slug: "one-a", title: "Uno A" }, { slug: "two-b", title: "Dos B" }];
+  const { input, output } = fakeIO(["q"]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.equal(chosen, null);
+});
+
+// TTY falso con setRawMode/isTTY para forzar el menú de flechas. Escribimos las
+// secuencias raw de teclado; readline.emitKeypressEvents las convierte en teclas.
+function fakeRawTty(sequences) {
+  const input = new PassThrough();
+  input.isTTY = true;
+  input.isRaw = false;
+  input.setRawMode = (v) => {
+    input.isRaw = v;
+    return input;
+  };
+  const output = new PassThrough();
+  let out = "";
+  output.on("data", (chunk) => {
+    out += chunk.toString();
+  });
+  let i = 0;
+  const feedNext = () => {
+    if (i < sequences.length) {
+      input.write(sequences[i++]);
+      setImmediate(feedNext);
+    }
+  };
+  setImmediate(feedNext);
+  return { input, output, getOutput: () => out };
+}
+
+const KEY = { up: "\u001b[A", down: "\u001b[B", enter: "\r", esc: "\u001b" };
+
+test("promptSelection (flechas) baja con ↓ y confirma con Enter", async () => {
+  const items = [
+    { slug: "one-a", title: "Uno A" },
+    { slug: "two-b", title: "Dos B" },
+    { slug: "three-c", title: "Tres C" },
+  ];
+  // Empieza en el índice 0; dos ↓ -> índice 2; Enter confirma.
+  const { input, output } = fakeRawTty([KEY.down, KEY.down, KEY.enter]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.equal(chosen.slug, "three-c");
+});
+
+test("promptSelection (flechas) envuelve hacia arriba y cancela con Esc", async () => {
+  const items = [{ slug: "one-a", title: "Uno A" }, { slug: "two-b", title: "Dos B" }];
+  const { input, output } = fakeRawTty([KEY.up, KEY.esc]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.equal(chosen, null);
+});
+
+test("resolveSlugFromSearch auto-selecciona cuando hay un solo resultado", async () => {
+  const slug = await resolveSlugFromSearch("cualquier", {
+    searchFn: async () => [{ slug: "solo-uno", title: "Solo Uno" }],
+  });
+  assert.equal(slug, "solo-uno");
+});
+
+test("resolveSlugFromSearch normaliza la query cuando no hay resultados", async () => {
+  const slug = await resolveSlugFromSearch("Dragon Ball Z", {
+    searchFn: async () => [],
+  });
+  assert.equal(slug, "dragon-ball-z");
+});
+
+test("resolveSlugFromSearch toma la primera coincidencia si no es interactivo", async () => {
+  const slug = await resolveSlugFromSearch("dragon", {
+    searchFn: async () => [
+      { slug: "dragon-ball", title: "Dragon Ball" },
+      { slug: "dragon-ball-super", title: "Dragon Ball Super" },
+    ],
+    isInteractive: () => false,
+  });
+  assert.equal(slug, "dragon-ball");
+});
+
+test("resolveSlugFromSearch usa la selección del usuario cuando es interactivo", async () => {
+  const slug = await resolveSlugFromSearch("dragon", {
+    searchFn: async () => [
+      { slug: "dragon-ball", title: "Dragon Ball" },
+      { slug: "dragon-ball-super", title: "Dragon Ball Super" },
+    ],
+    isInteractive: () => true,
+    promptFn: async (results) => results[1],
+  });
+  assert.equal(slug, "dragon-ball-super");
 });

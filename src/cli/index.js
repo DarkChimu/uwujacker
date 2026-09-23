@@ -2,9 +2,47 @@
 
 const path = require("path");
 const { downloadEpisode, downloadEpisodesInParallel } = require("../services/downloader");
-const { resolveAnimeSlug, resolveEpisodePlan } = require("../services/jkanime");
+const { resolveAnimeSlug, resolveEpisodePlan, searchAnimeByQuery, normalizeSlug } = require("../services/jkanime");
 const { ensureDirectoryExists } = require("../utils/files");
+const { promptSelection } = require("../utils/console");
 const { parseArgv } = require("./args");
+
+// Resolves the slug for the --search flag by letting the user pick from the
+// suggestion list. Only used for --search; the -a/--anime path stays untouched.
+// - 0 results  -> fall back to normalizing the query.
+// - 1 result   -> auto-select it (no point in a one-item menu).
+// - N results  -> prompt, unless stdin isn't a TTY (piped/CI), where we can't
+//                 ask, so we keep the old behavior and take the first match.
+async function resolveSlugFromSearch(query, options = {}) {
+  const {
+    searchFn = searchAnimeByQuery,
+    promptFn = promptSelection,
+    // Only prompt when we can actually read a choice: both ends must be a TTY.
+    // Piped stdin/stdout (CI, `| tee`, etc.) can't answer, so we fall back to
+    // the first match rather than hanging.
+    isInteractive = () => Boolean(process.stdin && process.stdin.isTTY && process.stdout && process.stdout.isTTY),
+  } = options;
+
+  const results = await searchFn(query);
+
+  if (!results.length) {
+    return normalizeSlug(query || "");
+  }
+
+  if (results.length === 1) {
+    return results[0].slug;
+  }
+
+  if (!isInteractive()) {
+    return results[0].slug;
+  }
+
+  const chosen = await promptFn(results);
+  if (!chosen) {
+    throw new Error("Selección cancelada. No se descargó nada.");
+  }
+  return chosen.slug;
+}
 
 function parseEpisodeSelection(value) {
   if (!value || value === "all") {
@@ -47,8 +85,13 @@ async function cli(argv = process.argv) {
     throw new Error("Debes indicar el anime con --anime o como primer argumento");
   }
 
-  const query = typeof args.search === "string" && args.search.trim() ? args.search.trim() : animeQuery;
-  const slug = query ? await resolveAnimeSlug(query) : animeQuery;
+  const searchQuery = typeof args.search === "string" && args.search.trim() ? args.search.trim() : "";
+  let slug;
+  if (searchQuery) {
+    slug = await resolveSlugFromSearch(searchQuery);
+  } else {
+    slug = animeQuery ? await resolveAnimeSlug(animeQuery) : animeQuery;
+  }
   const targetFolder = args.folder ? path.resolve(args.folder) : path.resolve("animes", slug || animeQuery);
   ensureDirectoryExists(targetFolder);
 
@@ -91,4 +134,5 @@ if (require.main === module) {
 module.exports = {
   cli,
   parseEpisodeSelection,
+  resolveSlugFromSearch,
 };

@@ -46,6 +46,10 @@ async function makeRequest(url, options = {}) {
         status: response.status,
         body: await response.text(),
         headers: Object.fromEntries(response.headers.entries()),
+        // set-cookie must be read via getSetCookie(): headers.entries() folds
+        // multiple Set-Cookie values into one comma-joined string, which breaks
+        // cookie parsing. JKAnime's ajax_search needs the session cookie back.
+        cookies: typeof response.headers.getSetCookie === "function" ? response.headers.getSetCookie() : [],
       };
     } catch (error) {
       if (attempt >= retries) {
@@ -234,9 +238,19 @@ async function searchAnimeByQuery(query, options = {}) {
   }
 
   const homeBody = homePage?.body || "";
-  const tokenMatch = homeBody.match(/name=["']_token["']\s+value=["']([^"']+)["']/i) ||
+  // JKAnime moved the CSRF token into a <meta name="csrf-token"> tag; the old
+  // form-input variants are kept as fallbacks in case the markup shifts again.
+  const tokenMatch = homeBody.match(/name=["']csrf-token["']\s+content=["']([^"']+)["']/i) ||
+    homeBody.match(/name=["']_token["']\s+value=["']([^"']+)["']/i) ||
     homeBody.match(/_token[^\n]*value=["']([^"']+)["']/i);
   const csrfToken = tokenMatch ? tokenMatch[1] : "";
+
+  // Laravel validates the token against the session cookie, so we must send the
+  // cookies from the home page back on the POST or the endpoint returns 419.
+  const cookieHeader = (homePage?.cookies || [])
+    .map((cookie) => String(cookie).split(";")[0])
+    .filter(Boolean)
+    .join("; ");
 
   const payload = new URLSearchParams({ _token: csrfToken, q: safeQuery });
 
@@ -245,7 +259,9 @@ async function searchAnimeByQuery(query, options = {}) {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
       "X-Requested-With": "XMLHttpRequest",
+      "X-CSRF-TOKEN": csrfToken,
       Accept: "application/json, text/plain, */*",
+      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
     },
     body: payload.toString(),
     validateStatus: (status) => status >= 200 && status < 500,

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-const { cli } = require("./src/cli");
+const { cli, resolveSlugFromSearch } = require("./src/cli");
+const { promptSelection } = require("./src/utils/console");
 const { parseArgs } = require("./src/cli/args");
 const {
   downloadEpisode,
@@ -46,4 +47,6 @@ module.exports = {
   downloadEpisodesInParallel,
   searchAnimeByQuery,
   resolveAnimeSlug,
+  resolveSlugFromSearch,
+  promptSelection,
 };
