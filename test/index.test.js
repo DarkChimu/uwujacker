@@ -345,6 +345,31 @@ test("searchAnimeByQuery realiza una búsqueda AJAX y obtiene resultados", async
   assert.equal(results[0].title, "Dr. Stone");
 });
 
+test("searchAnimeByQuery lee el token del meta y reenvía la cookie de sesión", async () => {
+  // Regresión: JKAnime devolvía 419 porque leíamos el token de un <input> que ya
+  // no existe y no reenviábamos la cookie de sesión. Ahora el token viene del
+  // <meta name="csrf-token"> y la cookie del home debe llegar al ajax_search.
+  let sentHeaders = null;
+  const homeRequestFn = async () => ({
+    body: '<meta name="csrf-token" content="tok-42">',
+    cookies: ["XSRF-TOKEN=abc; Path=/; HttpOnly", "jkanime_session=xyz; Path=/"],
+  });
+  const requestFn = async (url, opts = {}) => {
+    if (url.includes("ajax_search")) {
+      sentHeaders = opts.headers;
+      return { body: JSON.stringify([{ slug: "uma-musume-cinderella-gray", title: "Uma Musume: Cinderella Gray" }]) };
+    }
+    throw new Error(`URL inesperada: ${url}`);
+  };
+
+  const results = await searchAnimeByQuery("uma musume", { homeRequestFn, requestFn });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].slug, "uma-musume-cinderella-gray");
+  assert.equal(sentHeaders["X-CSRF-TOKEN"], "tok-42");
+  assert.equal(sentHeaders.Cookie, "XSRF-TOKEN=abc; jkanime_session=xyz");
+});
+
 test("searchAnimeByQuery devuelve resultados de la AJAX search", async () => {
   const results = await searchAnimeByQuery("Dragon", {
     homeRequestFn: async () => ({ body: '<input name="_token" value="abc123">' }),
