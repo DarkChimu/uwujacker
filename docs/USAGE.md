@@ -61,6 +61,12 @@ solo aplica a `--search`; con `-a/--anime` se usa el nombre/slug tal cual.
 Al elegir varios animes, cada uno se guarda en `./animes/<slug>/`. Si pasas
 `-f/--folder`, los descargas se anidan en `<folder>/<slug>/` para no mezclarse.
 
+Cuando descargas varios animes a la vez, al final se imprime un único resumen
+consolidado: una línea por anime con su título y un `✓`/`✗` según el resultado,
+el detalle de los episodios fallidos bajo cada anime, y una línea de totales
+(animes, episodios completados y fallos). Con un solo anime se mantiene el
+resumen individual de siempre.
+
 ## MP4 directo vs HLS
 
 uwujacker prefiere el servidor que ofrece un MP4 directo, así que la mayoría de

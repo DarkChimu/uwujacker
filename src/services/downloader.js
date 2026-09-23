@@ -570,6 +570,10 @@ async function downloadEpisodesInParallel({
   overwrite = false,
   skipExisting = true,
   downloadEpisodeFn = downloadEpisode,
+  // When false, skip printing the per-anime summary so a caller (multi-slug)
+  // can print one consolidated summary instead. The structured result is
+  // always returned regardless.
+  printSummary = true,
 }) {
   const queue = [...episodes];
   const results = [];
@@ -684,19 +688,23 @@ async function downloadEpisodesInParallel({
 
   if (multibar) multibar.stop();
 
-  const summaryLines = [
-    "Resumen:",
-    `  ${String(completed).padStart(2, "0")}/${String(total).padStart(2, "0")} episodios completados`,
-    `  OK: ${String(successCount).padStart(2, "0")}`,
-    `  ERR: ${String(errorCount).padStart(2, "0")}`,
-    `  Ruta: ${folder}`,
-    ...(failures.length
-      ? ["  Episodios fallidos:", ...failures.map((f) => `    ${f.episode}: ${f.error}`)]
-      : []),
-  ];
+  if (printSummary) {
+    const summaryLines = [
+      "Resumen:",
+      `  ${String(completed).padStart(2, "0")}/${String(total).padStart(2, "0")} episodios completados`,
+      `  OK: ${String(successCount).padStart(2, "0")}`,
+      `  ERR: ${String(errorCount).padStart(2, "0")}`,
+      `  Ruta: ${folder}`,
+      ...(failures.length
+        ? ["  Episodios fallidos:", ...failures.map((f) => `    ${f.episode}: ${f.error}`)]
+        : []),
+    ];
+    console.log(summaryLines.join("\n"));
+  }
 
-  console.log(summaryLines.join("\n"));
-  return results;
+  // Structured result lets a multi-slug caller consolidate all summaries.
+  // `files` keeps the historical array-of-paths shape for existing callers.
+  return { anime, folder, total, ok: successCount, err: errorCount, files: results, failures };
 }
 
 module.exports = {

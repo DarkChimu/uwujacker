@@ -293,7 +293,9 @@ test("downloadEpisodesInParallel respeta el límite de concurrencia", async () =
     },
   });
 
-  assert.deepEqual(result, ["dr-stone-1.mp4", "dr-stone-2.mp4", "dr-stone-3.mp4", "dr-stone-4.mp4"]);
+  assert.deepEqual(result.files, ["dr-stone-1.mp4", "dr-stone-2.mp4", "dr-stone-3.mp4", "dr-stone-4.mp4"]);
+  assert.equal(result.ok, 4);
+  assert.equal(result.err, 0);
   assert.equal(maxActive, 2);
 });
 
@@ -317,7 +319,10 @@ test("downloadEpisodesInParallel no aborta el lote si un episodio falla", async 
   // El fallo del episodio 2 no debe impedir que se intenten los 4 ni que se
   // descarguen los 3 restantes; la promesa se resuelve, no rechaza.
   assert.deepEqual(attempted, ["1", "2", "3", "4"]);
-  assert.deepEqual(result, ["dr-stone-1.mp4", "dr-stone-3.mp4", "dr-stone-4.mp4"]);
+  assert.deepEqual(result.files, ["dr-stone-1.mp4", "dr-stone-3.mp4", "dr-stone-4.mp4"]);
+  assert.equal(result.ok, 3);
+  assert.equal(result.err, 1);
+  assert.deepEqual(result.failures.map((f) => f.episode), ["2"]);
 });
 
 test("searchAnimeByQuery realiza una búsqueda AJAX y obtiene resultados", async () => {
@@ -669,7 +674,7 @@ test("downloadSegments rechaza páginas de error del CDN (no son MPEG-TS)", asyn
   );
 });
 
-const { promptSelection, resolveSlugFromSearch } = require("../index.js");
+const { promptSelection, resolveSlugFromSearch, formatMultiSummary } = require("../index.js");
 const { episodeSpecFromArgs, parseEpisodeAnswer, folderForSlug } = require("../src/cli");
 const { PassThrough } = require("node:stream");
 
@@ -793,32 +798,32 @@ test("promptSelection (flechas) envuelve hacia arriba y cancela con Esc", async 
 });
 
 test("resolveSlugFromSearch auto-selecciona cuando hay un solo resultado", async () => {
-  const slugs = await resolveSlugFromSearch("cualquier", {
+  const animes = await resolveSlugFromSearch("cualquier", {
     searchFn: async () => [{ slug: "solo-uno", title: "Solo Uno" }],
   });
-  assert.deepEqual(slugs, ["solo-uno"]);
+  assert.deepEqual(animes, [{ slug: "solo-uno", title: "Solo Uno" }]);
 });
 
 test("resolveSlugFromSearch normaliza la query cuando no hay resultados", async () => {
-  const slugs = await resolveSlugFromSearch("Dragon Ball Z", {
+  const animes = await resolveSlugFromSearch("Dragon Ball Z", {
     searchFn: async () => [],
   });
-  assert.deepEqual(slugs, ["dragon-ball-z"]);
+  assert.deepEqual(animes, [{ slug: "dragon-ball-z", title: "dragon-ball-z" }]);
 });
 
 test("resolveSlugFromSearch toma la primera coincidencia si no es interactivo", async () => {
-  const slugs = await resolveSlugFromSearch("dragon", {
+  const animes = await resolveSlugFromSearch("dragon", {
     searchFn: async () => [
       { slug: "dragon-ball", title: "Dragon Ball" },
       { slug: "dragon-ball-super", title: "Dragon Ball Super" },
     ],
     isInteractive: () => false,
   });
-  assert.deepEqual(slugs, ["dragon-ball"]);
+  assert.deepEqual(animes, [{ slug: "dragon-ball", title: "Dragon Ball" }]);
 });
 
-test("resolveSlugFromSearch devuelve varios slugs cuando el usuario marca varios", async () => {
-  const slugs = await resolveSlugFromSearch("dragon", {
+test("resolveSlugFromSearch devuelve varios animes (slug+título) cuando el usuario marca varios", async () => {
+  const animes = await resolveSlugFromSearch("dragon", {
     searchFn: async () => [
       { slug: "dragon-ball", title: "Dragon Ball" },
       { slug: "dragon-ball-super", title: "Dragon Ball Super" },
@@ -827,7 +832,10 @@ test("resolveSlugFromSearch devuelve varios slugs cuando el usuario marca varios
     isInteractive: () => true,
     promptFn: async (results) => [results[0], results[2]],
   });
-  assert.deepEqual(slugs, ["dragon-ball", "dragon-ball-z"]);
+  assert.deepEqual(animes, [
+    { slug: "dragon-ball", title: "Dragon Ball" },
+    { slug: "dragon-ball-z", title: "Dragon Ball Z" },
+  ]);
 });
 
 test("resolveSlugFromSearch lanza error si se cancela la selección", async () => {
@@ -888,4 +896,35 @@ test("folderForSlug: con --folder y un solo anime usa la carpeta tal cual", () =
 test("folderForSlug: con --folder y varios animes anida <folder>/<slug>", () => {
   const p = folderForSlug("uma-musume", { folder: "./descargas", multiple: true });
   assert.match(p, /descargas[/\\]uma-musume$/);
+});
+
+test("formatMultiSummary consolida por anime con título y totales", () => {
+  // En el runner stdout no es TTY, así que la salida es texto plano (OK/!!).
+  const out = formatMultiSummary(
+    [
+      { title: "Uma Musume: BNW no Chikai", slug: "a", ok: 2, err: 0, total: 2, failures: [] },
+      { title: "Uma Musume: Road to the Top", slug: "b", ok: 1, err: 0, total: 1, failures: [] },
+      {
+        title: "Uma Musume: Shin Jidai no Tobira",
+        slug: "c",
+        ok: 1,
+        err: 1,
+        total: 2,
+        failures: [{ episode: "2", error: "estado 404" }],
+      },
+    ],
+    { rootFolder: "/x/animes" }
+  );
+
+  // Aparece el título de cada anime.
+  assert.match(out, /Uma Musume: BNW no Chikai/);
+  assert.match(out, /Uma Musume: Road to the Top/);
+  assert.match(out, /Uma Musume: Shin Jidai no Tobira/);
+  // El detalle del fallo va bajo su anime.
+  assert.match(out, /ep 2: estado 404/);
+  // Totales consolidados: 3 animes, 4/5 episodios, 1 fallo.
+  assert.match(out, /3 animes/);
+  assert.match(out, /4\/5 episodios/);
+  assert.match(out, /1 fallo\b/);
+  assert.match(out, /Carpeta:.*animes/);
 });

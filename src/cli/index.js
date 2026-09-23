@@ -4,13 +4,14 @@ const path = require("path");
 const { downloadEpisode, downloadEpisodesInParallel } = require("../services/downloader");
 const { resolveAnimeSlug, resolveEpisodePlan, searchAnimeByQuery, normalizeSlug } = require("../services/jkanime");
 const { ensureDirectoryExists } = require("../utils/files");
-const { promptSelection, promptText } = require("../utils/console");
+const { promptSelection, promptText, formatMultiSummary } = require("../utils/console");
 const { parseArgv } = require("./args");
 
-// Resolves the slug(s) for the --search flag by letting the user pick from the
+// Resolves the anime(s) for the --search flag by letting the user pick from the
 // suggestion list (multi-select). Only used for --search; the -a/--anime path
-// stays untouched. Always returns an array of slugs.
-// - 0 results  -> fall back to normalizing the query.
+// stays untouched. Always returns an array of { slug, title } so the final
+// summary can show the real title, not just the slug.
+// - 0 results  -> fall back to normalizing the query (title = slug).
 // - 1 result   -> auto-select it (no point in a menu).
 // - N results  -> prompt, unless stdin isn't a TTY (piped/CI), where we can't
 //                 ask, so we keep the old behavior and take the first match.
@@ -26,23 +27,22 @@ async function resolveSlugFromSearch(query, options = {}) {
 
   const results = await searchFn(query);
 
+  const pick = (item) => ({ slug: item.slug, title: item.title || item.slug });
+
   if (!results.length) {
-    return [normalizeSlug(query || "")];
+    const slug = normalizeSlug(query || "");
+    return [{ slug, title: slug }];
   }
 
-  if (results.length === 1) {
-    return [results[0].slug];
-  }
-
-  if (!isInteractive()) {
-    return [results[0].slug];
+  if (results.length === 1 || !isInteractive()) {
+    return [pick(results[0])];
   }
 
   const chosen = await promptFn(results);
   if (!chosen || chosen.length === 0) {
     throw new Error("Selección cancelada. No se descargó nada.");
   }
-  return chosen.map((item) => item.slug);
+  return chosen.map(pick);
 }
 
 function parseEpisodeSelection(value) {
@@ -89,9 +89,12 @@ function folderForSlug(slug, { folder, multiple }) {
   return path.resolve("animes", slug);
 }
 
-// Downloads one anime according to the resolved episode selection.
-// `episodesSpec` is either "all" or an array of episode numbers.
-async function downloadAnime(slug, episodesSpec, args, targetFolder) {
+// Downloads one anime according to the resolved episode selection and returns a
+// per-anime result { title, slug, folder, ok, err, total, failures }.
+// `episodesSpec` is "all", an array of episode numbers, or a single number.
+// `printSummary` is forwarded to the batch downloader: for multi-anime we
+// suppress the per-anime summary and print one consolidated summary instead.
+async function downloadAnime({ slug, title, episodesSpec, args, targetFolder, printSummary }) {
   ensureDirectoryExists(targetFolder);
   const common = {
     anime: slug,
@@ -105,15 +108,30 @@ async function downloadAnime(slug, episodesSpec, args, targetFolder) {
     const episodes = Array.isArray(episodesSpec)
       ? episodesSpec
       : await resolveEpisodePlan({ animeSlug: slug });
-    await downloadEpisodesInParallel({
+    const res = await downloadEpisodesInParallel({
       ...common,
       episodes,
       concurrency: Math.max(1, Number(args.concurrency) || 5),
+      printSummary,
     });
-    return;
+    return { title, slug, folder: targetFolder, ok: res.ok, err: res.err, total: res.total, failures: res.failures };
   }
 
-  await downloadEpisode({ ...common, episode: episodesSpec });
+  // Single episode: normalize into the same shape as the batch result.
+  try {
+    await downloadEpisode({ ...common, episode: episodesSpec });
+    return { title, slug, folder: targetFolder, ok: 1, err: 0, total: 1, failures: [] };
+  } catch (error) {
+    return {
+      title,
+      slug,
+      folder: targetFolder,
+      ok: 0,
+      err: 1,
+      total: 1,
+      failures: [{ episode: String(episodesSpec), error: error.message || String(error) }],
+    };
+  }
 }
 
 // Turns the CLI episode flags into a normalized selection: "all", or an array
@@ -153,16 +171,17 @@ async function cli(argv = process.argv) {
   }
 
   const searchQuery = typeof args.search === "string" && args.search.trim() ? args.search.trim() : "";
-  let slugs;
+  let animes; // [{ slug, title }]
   if (searchQuery) {
-    slugs = await resolveSlugFromSearch(searchQuery);
+    animes = await resolveSlugFromSearch(searchQuery);
   } else {
-    slugs = [animeQuery ? await resolveAnimeSlug(animeQuery) : animeQuery];
+    const slug = animeQuery ? await resolveAnimeSlug(animeQuery) : animeQuery;
+    animes = [{ slug, title: slug }];
   }
 
   // Episode selection: honor -e/-r if given; otherwise ask once and apply the
   // same selection to every chosen anime. The prompt only runs after a search
-  // (where slugs come from the menu); the -a path keeps its -e default of 1.
+  // (where animes come from the menu); the -a path keeps its -e default of 1.
   let episodesSpec = episodeSpecFromArgs(args);
   if (episodesSpec === null) {
     if (searchQuery) {
@@ -175,10 +194,26 @@ async function cli(argv = process.argv) {
     }
   }
 
-  const multiple = slugs.length > 1;
-  for (const slug of slugs) {
+  const multiple = animes.length > 1;
+  const outcomes = [];
+  for (const { slug, title } of animes) {
     const targetFolder = folderForSlug(slug, { folder: args.folder, multiple });
-    await downloadAnime(slug, episodesSpec, args, targetFolder);
+    // For multiple animes, suppress per-anime summaries and print one
+    // consolidated summary at the end; single anime keeps its own summary.
+    const outcome = await downloadAnime({
+      slug,
+      title,
+      episodesSpec,
+      args,
+      targetFolder,
+      printSummary: !multiple,
+    });
+    outcomes.push(outcome);
+  }
+
+  if (multiple) {
+    const rootFolder = args.folder ? path.resolve(args.folder) : path.resolve("animes");
+    console.log(formatMultiSummary(outcomes, { rootFolder }));
   }
 }
 

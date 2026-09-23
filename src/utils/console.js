@@ -177,6 +177,53 @@ function lineSelection(items, { input, output, renderItem }) {
   return ask().finally(() => rl.close());
 }
 
+// Builds a single consolidated summary for a multi-anime download. Each entry
+// is { title, slug, folder, ok, err, total, failures }. Uses ✓/✗ with color
+// when ANSI is available and degrades to plain OK/ERR otherwise. Returns the
+// string (printing is left to the caller so it stays testable).
+function formatMultiSummary(entries, { rootFolder } = {}) {
+  const ansi = consoleSupportsAnsi();
+  const okMark = ansi ? colorize("✓", "32") : "OK";
+  const errMark = ansi ? colorize("✗", "31") : "!!";
+
+  let totalOk = 0;
+  let totalEp = 0;
+  let totalErr = 0;
+
+  const lines = ["", colorize("Resumen de la descarga", "1"), ""];
+
+  for (const entry of entries) {
+    const { title, slug, ok = 0, err = 0, total = 0, failures = [] } = entry;
+    totalOk += ok;
+    totalEp += total;
+    totalErr += err;
+
+    const mark = err > 0 ? errMark : okMark;
+    const name = title || slug || "(desconocido)";
+    const detail = err > 0 ? `${ok}/${total} OK, ${err} ERR` : `${ok}/${total} OK`;
+    lines.push(`  ${mark} ${name}  ${colorize(detail, "90")}`);
+
+    for (const failure of failures) {
+      lines.push(`      ${colorize("·", "90")} ep ${failure.episode}: ${failure.error}`);
+    }
+  }
+
+  lines.push("");
+  const animesWord = entries.length === 1 ? "anime" : "animes";
+  const failWord = totalErr === 1 ? "fallo" : "fallos";
+  const totalsParts = [
+    `${entries.length} ${animesWord}`,
+    `${totalOk}/${totalEp} episodios`,
+    ...(totalErr ? [`${totalErr} ${failWord}`] : []),
+  ];
+  lines.push(`  ${colorize("Total:", "1")} ${totalsParts.join("  ·  ")}`);
+  if (rootFolder) {
+    lines.push(`  ${colorize("Carpeta:", "1")} ${rootFolder}`);
+  }
+
+  return lines.join("\n");
+}
+
 // Prompts for a free-text line (used to ask the episode selection after picking
 // animes). Returns the trimmed string, or "" on empty/cancel. Injectable I/O.
 function promptText(question, options = {}) {
@@ -199,4 +246,5 @@ module.exports = {
   colorize,
   promptSelection,
   promptText,
+  formatMultiSummary,
 };
