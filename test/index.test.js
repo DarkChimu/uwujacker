@@ -585,6 +585,42 @@ test("downloadFile (HLS) reporta progreso real usando la duración de ffprobe", 
   assert.ok(progress.some((p) => p.final === true && p.percent === 100));
 });
 
+test("downloadFile (HLS) no imprime 'Archivo listo' cuando hay onProgress (evita residuo en las barras)", async () => {
+  // Regresión: con el MultiBar (onProgress presente) el log 'Archivo listo' se
+  // colaba en medio de las barras y dejaba residuo en la consola (PowerShell).
+  const filePath = path.resolve("./tmp/hls-noecho.mp4");
+  const spawnFn = (command) => {
+    const stream = fakeChild();
+    if (/ffprobe/i.test(command)) {
+      setImmediate(() => {
+        stream.stdout.emit("data", "10\n");
+        stream.emit("close", 0);
+      });
+    } else {
+      setImmediate(() => {
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, "x".repeat(512));
+        stream.emit("close", 0);
+      });
+    }
+    return stream;
+  };
+
+  const logged = [];
+  const originalLog = console.log;
+  console.log = (...a) => logged.push(a.join(" "));
+  try {
+    await downloadFile("https://example.com/video.m3u8", filePath, {
+      spawnFn,
+      onProgress: () => {},
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.ok(!logged.some((l) => /Archivo listo/.test(l)), "no debe imprimir 'Archivo listo' con onProgress");
+});
+
 test("parseM3u8 extrae segmentos en orden y resuelve URLs relativas", () => {
   const body = [
     "#EXTM3U",

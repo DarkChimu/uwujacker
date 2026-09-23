@@ -390,7 +390,12 @@ async function downloadHlsFile(url, filePath, options = {}) {
   try {
     const out = await downloadHlsParallel(url, filePath, { ffmpegPath, spawnFn, emit });
     if (bar) bar.stop();
-    if (!verbose) console.log(`Archivo listo: ${out} (${formatBytes(validateDownloadedFile(out).size)})`);
+    // Only print the standalone "Archivo listo" line when nobody upstream owns
+    // the UI. With an onProgress collector (the parallel MultiBar) this log
+    // would print in the middle of the live bars and leave residue.
+    if ((bar || !onProgress) && !verbose) {
+      console.log(`Archivo listo: ${out} (${formatBytes(validateDownloadedFile(out).size)})`);
+    }
     return out;
   } catch (error) {
     if (verbose) {
@@ -479,7 +484,7 @@ async function downloadHlsFile(url, filePath, options = {}) {
         const result = validateDownloadedFile(filePath);
         emit({ filePath, downloaded: result.size, total: result.size, percent: 100, final: true });
         if (bar) bar.stop();
-        if (!verbose) {
+        if ((bar || !onProgress) && !verbose) {
           console.log(`Archivo listo: ${result.filePath} (${formatBytes(result.size)})`);
         }
         resolve(result.filePath);
