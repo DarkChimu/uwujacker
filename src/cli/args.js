@@ -54,7 +54,7 @@ function buildParser(argv) {
     .option("search", {
       type: "string",
       default: "",
-      describe: "Busca el slug correcto en JKAnime antes de descargar",
+      describe: "Busca en JKAnime y elige el slug de una lista de coincidencias antes de descargar",
     })
     .option("verbose", {
       alias: "v",

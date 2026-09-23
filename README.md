@@ -48,11 +48,16 @@ Descargar todos los episodios disponibles:
 uwujacker -a dr-stone -e all
 ```
 
-Buscar por nombre/slug antes de descargar:
+Buscar por nombre y elegir el slug de una lista de coincidencias antes de descargar:
 
 ```bash
 uwujacker --search "Dragon Ball" -e 1
 ```
+
+Si la búsqueda devuelve varias coincidencias (ediciones, temporadas o variantes
+del nombre), se muestra una lista numerada para que elijas el slug correcto. Con
+una sola coincidencia se selecciona automáticamente. En entornos no interactivos
+(salida por pipe o CI) se usa la primera coincidencia.
 
 Ejecutar directamente con Yarn:
 

@@ -42,7 +42,11 @@ La ruta indicada se usará tal cual.
 uwujacker --search "Dragon Ball" -e 1
 ```
 
-Esto resuelve el slug correcto antes de descargar.
+Cuando hay varias coincidencias (ediciones, temporadas o variantes del nombre),
+uwujacker muestra una lista numerada para que elijas el slug correcto y luego
+inicia la descarga. Con una única coincidencia se selecciona automáticamente. En
+entornos no interactivos (salida por pipe o CI) se toma la primera coincidencia.
+Esto solo aplica a `--search`; con `-a/--anime` se usa el nombre/slug tal cual.
 
 ## MP4 directo vs HLS
 

@@ -643,3 +643,93 @@ test("downloadSegments rechaza páginas de error del CDN (no son MPEG-TS)", asyn
     /segmento falló/
   );
 });
+
+const { promptSelection, resolveSlugFromSearch } = require("../index.js");
+const { PassThrough } = require("node:stream");
+
+// Construye streams input/output falsos para pilotar readline sin un TTY real.
+// `keystrokes` son las líneas que el "usuario" teclea, en orden.
+function fakeIO(keystrokes) {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let out = "";
+  output.on("data", (chunk) => {
+    out += chunk.toString();
+  });
+  // Emitimos cada respuesta en el siguiente tick para que readline la lea línea a línea.
+  let i = 0;
+  const feedNext = () => {
+    if (i < keystrokes.length) {
+      input.write(`${keystrokes[i++]}\n`);
+      setImmediate(feedNext);
+    }
+  };
+  setImmediate(feedNext);
+  return { input, output, getOutput: () => out };
+}
+
+test("promptSelection devuelve el item elegido por índice", async () => {
+  const items = [
+    { slug: "one-a", title: "Uno A" },
+    { slug: "two-b", title: "Dos B" },
+    { slug: "three-c", title: "Tres C" },
+  ];
+  const { input, output } = fakeIO(["2"]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.equal(chosen.slug, "two-b");
+});
+
+test("promptSelection reintenta ante entrada inválida y luego acepta una válida", async () => {
+  const items = [
+    { slug: "one-a", title: "Uno A" },
+    { slug: "two-b", title: "Dos B" },
+  ];
+  const { input, output, getOutput } = fakeIO(["99", "abc", "1"]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.equal(chosen.slug, "one-a");
+  assert.match(getOutput(), /no válida/i);
+});
+
+test("promptSelection devuelve null si se cancela con 'q'", async () => {
+  const items = [{ slug: "one-a", title: "Uno A" }, { slug: "two-b", title: "Dos B" }];
+  const { input, output } = fakeIO(["q"]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.equal(chosen, null);
+});
+
+test("resolveSlugFromSearch auto-selecciona cuando hay un solo resultado", async () => {
+  const slug = await resolveSlugFromSearch("cualquier", {
+    searchFn: async () => [{ slug: "solo-uno", title: "Solo Uno" }],
+  });
+  assert.equal(slug, "solo-uno");
+});
+
+test("resolveSlugFromSearch normaliza la query cuando no hay resultados", async () => {
+  const slug = await resolveSlugFromSearch("Dragon Ball Z", {
+    searchFn: async () => [],
+  });
+  assert.equal(slug, "dragon-ball-z");
+});
+
+test("resolveSlugFromSearch toma la primera coincidencia si no es interactivo", async () => {
+  const slug = await resolveSlugFromSearch("dragon", {
+    searchFn: async () => [
+      { slug: "dragon-ball", title: "Dragon Ball" },
+      { slug: "dragon-ball-super", title: "Dragon Ball Super" },
+    ],
+    isInteractive: () => false,
+  });
+  assert.equal(slug, "dragon-ball");
+});
+
+test("resolveSlugFromSearch usa la selección del usuario cuando es interactivo", async () => {
+  const slug = await resolveSlugFromSearch("dragon", {
+    searchFn: async () => [
+      { slug: "dragon-ball", title: "Dragon Ball" },
+      { slug: "dragon-ball-super", title: "Dragon Ball Super" },
+    ],
+    isInteractive: () => true,
+    promptFn: async (results) => results[1],
+  });
+  assert.equal(slug, "dragon-ball-super");
+});
