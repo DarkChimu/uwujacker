@@ -390,7 +390,12 @@ async function downloadHlsFile(url, filePath, options = {}) {
   try {
     const out = await downloadHlsParallel(url, filePath, { ffmpegPath, spawnFn, emit });
     if (bar) bar.stop();
-    if (!verbose) console.log(`Archivo listo: ${out} (${formatBytes(validateDownloadedFile(out).size)})`);
+    // Only print the standalone "Archivo listo" line when nobody upstream owns
+    // the UI. With an onProgress collector (the parallel MultiBar) this log
+    // would print in the middle of the live bars and leave residue.
+    if ((bar || !onProgress) && !verbose) {
+      console.log(`Archivo listo: ${out} (${formatBytes(validateDownloadedFile(out).size)})`);
+    }
     return out;
   } catch (error) {
     if (verbose) {
@@ -479,7 +484,7 @@ async function downloadHlsFile(url, filePath, options = {}) {
         const result = validateDownloadedFile(filePath);
         emit({ filePath, downloaded: result.size, total: result.size, percent: 100, final: true });
         if (bar) bar.stop();
-        if (!verbose) {
+        if ((bar || !onProgress) && !verbose) {
           console.log(`Archivo listo: ${result.filePath} (${formatBytes(result.size)})`);
         }
         resolve(result.filePath);
@@ -570,6 +575,10 @@ async function downloadEpisodesInParallel({
   overwrite = false,
   skipExisting = true,
   downloadEpisodeFn = downloadEpisode,
+  // When false, skip printing the per-anime summary so a caller (multi-slug)
+  // can print one consolidated summary instead. The structured result is
+  // always returned regardless.
+  printSummary = true,
 }) {
   const queue = [...episodes];
   const results = [];
@@ -684,19 +693,23 @@ async function downloadEpisodesInParallel({
 
   if (multibar) multibar.stop();
 
-  const summaryLines = [
-    "Resumen:",
-    `  ${String(completed).padStart(2, "0")}/${String(total).padStart(2, "0")} episodios completados`,
-    `  OK: ${String(successCount).padStart(2, "0")}`,
-    `  ERR: ${String(errorCount).padStart(2, "0")}`,
-    `  Ruta: ${folder}`,
-    ...(failures.length
-      ? ["  Episodios fallidos:", ...failures.map((f) => `    ${f.episode}: ${f.error}`)]
-      : []),
-  ];
+  if (printSummary) {
+    const summaryLines = [
+      "Resumen:",
+      `  ${String(completed).padStart(2, "0")}/${String(total).padStart(2, "0")} episodios completados`,
+      `  OK: ${String(successCount).padStart(2, "0")}`,
+      `  ERR: ${String(errorCount).padStart(2, "0")}`,
+      `  Ruta: ${folder}`,
+      ...(failures.length
+        ? ["  Episodios fallidos:", ...failures.map((f) => `    ${f.episode}: ${f.error}`)]
+        : []),
+    ];
+    console.log(summaryLines.join("\n"));
+  }
 
-  console.log(summaryLines.join("\n"));
-  return results;
+  // Structured result lets a multi-slug caller consolidate all summaries.
+  // `files` keeps the historical array-of-paths shape for existing callers.
+  return { anime, folder, total, ok: successCount, err: errorCount, files: results, failures };
 }
 
 module.exports = {

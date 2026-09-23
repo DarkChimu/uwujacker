@@ -43,12 +43,29 @@ uwujacker --search "Dragon Ball" -e 1
 ```
 
 Cuando hay varias coincidencias (ediciones, temporadas o variantes del nombre),
-uwujacker muestra una lista interactiva para que elijas el anime: navega con las
-flechas ↑/↓, confirma con Enter (o Espacio) y cancela con Esc. Tras elegir, se
-inicia la descarga. Con una única coincidencia se selecciona automáticamente. En
-entornos no interactivos (salida por pipe o CI) se muestra una lista numerada y,
-si no puede leerse una respuesta, se toma la primera coincidencia. Esto solo
-aplica a `--search`; con `-a/--anime` se usa el nombre/slug tal cual.
+uwujacker muestra una lista interactiva (con el nombre y versión del proyecto en
+la cabecera) para que elijas uno o varios animes: navega con las flechas ↑/↓,
+marca/desmarca con Espacio y confirma la selección con Enter; cancela con Esc. Al
+salir del menú la lista se limpia de la consola.
+
+Si no indicas `-e/--episode` (ni `-r/--range`), tras confirmar la selección se te
+pregunta qué descargar; la respuesta acepta lo mismo que `-e`: un número, un
+rango `3-6`, una lista `1,3,5` o `all`. Esa selección se aplica a todos los
+animes marcados.
+
+Con una única coincidencia se selecciona automáticamente. En entornos no
+interactivos (salida por pipe o CI) se muestra una lista numerada de selección
+única y, si no puede leerse una respuesta, se toma la primera coincidencia. Esto
+solo aplica a `--search`; con `-a/--anime` se usa el nombre/slug tal cual.
+
+Al elegir varios animes, cada uno se guarda en `./animes/<slug>/`. Si pasas
+`-f/--folder`, los descargas se anidan en `<folder>/<slug>/` para no mezclarse.
+
+Cuando descargas varios animes a la vez, al final se imprime un único resumen
+consolidado: una línea por anime con su título y un `✓`/`✗` según el resultado,
+el detalle de los episodios fallidos bajo cada anime, y una línea de totales
+(animes, episodios completados y fallos). Con un solo anime se mantiene el
+resumen individual de siempre.
 
 ## MP4 directo vs HLS
 

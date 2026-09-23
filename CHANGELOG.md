@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.0] - 2026-09-23
+
+### Added
+- Selección múltiple de animes en `--search`: el menú permite marcar varias coincidencias con Espacio y confirmar con Enter (Esc cancela). Se descargan todos los animes elegidos en una sola ejecución. La cabecera del menú muestra el nombre y versión del proyecto, y la lista se limpia de la consola al salir.
+- Pregunta de episodio tras la selección: si no se indica `-e/--episode` (ni `-r/--range`), se pregunta qué descargar (número, rango `3-6`, lista `1,3,5` o `all`) y esa selección se aplica a todos los animes marcados.
+- Resumen consolidado en descargas de varios animes: un único bloque con una línea por anime (con su título real y `✓`/`✗`), los episodios fallidos indentados bajo cada anime y una línea de totales (animes, episodios y fallos). Con colores/símbolos en terminales con ANSI y texto plano en el resto. Con un solo anime se mantiene el resumen individual de siempre.
+
+### Changed
+- Al elegir varios animes, cada uno se guarda en `./animes/<slug>/`; con `-f/--folder` las descargas se anidan en `<folder>/<slug>/` para no mezclarse.
+- `downloadEpisodesInParallel` devuelve ahora un resultado estructurado (`{ anime, folder, total, ok, err, files, failures }`) y acepta `printSummary` para poder consolidar el resumen desde el llamador.
+
+### Fixed
+- Corregido el residuo en consola durante descargas HLS en lote: la línea "Archivo listo" se imprimía en medio de las barras del MultiBar (dejando una barra al 100% pegada a un mensaje cortado en PowerShell). Ahora solo se imprime cuando ningún componente gestiona la UI (`bar || !onProgress`), igual que el camino de descarga directa.
+
 ## [1.2.0] - 2026-09-23
 
 ### Added

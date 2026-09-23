@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const { cli, resolveSlugFromSearch } = require("./src/cli");
-const { promptSelection } = require("./src/utils/console");
+const { promptSelection, formatMultiSummary } = require("./src/utils/console");
 const { parseArgs } = require("./src/cli/args");
 const {
   downloadEpisode,
@@ -49,4 +49,5 @@ module.exports = {
   resolveAnimeSlug,
   resolveSlugFromSearch,
   promptSelection,
+  formatMultiSummary,
 };

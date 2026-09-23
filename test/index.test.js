@@ -293,7 +293,9 @@ test("downloadEpisodesInParallel respeta el límite de concurrencia", async () =
     },
   });
 
-  assert.deepEqual(result, ["dr-stone-1.mp4", "dr-stone-2.mp4", "dr-stone-3.mp4", "dr-stone-4.mp4"]);
+  assert.deepEqual(result.files, ["dr-stone-1.mp4", "dr-stone-2.mp4", "dr-stone-3.mp4", "dr-stone-4.mp4"]);
+  assert.equal(result.ok, 4);
+  assert.equal(result.err, 0);
   assert.equal(maxActive, 2);
 });
 
@@ -317,7 +319,10 @@ test("downloadEpisodesInParallel no aborta el lote si un episodio falla", async 
   // El fallo del episodio 2 no debe impedir que se intenten los 4 ni que se
   // descarguen los 3 restantes; la promesa se resuelve, no rechaza.
   assert.deepEqual(attempted, ["1", "2", "3", "4"]);
-  assert.deepEqual(result, ["dr-stone-1.mp4", "dr-stone-3.mp4", "dr-stone-4.mp4"]);
+  assert.deepEqual(result.files, ["dr-stone-1.mp4", "dr-stone-3.mp4", "dr-stone-4.mp4"]);
+  assert.equal(result.ok, 3);
+  assert.equal(result.err, 1);
+  assert.deepEqual(result.failures.map((f) => f.episode), ["2"]);
 });
 
 test("searchAnimeByQuery realiza una búsqueda AJAX y obtiene resultados", async () => {
@@ -580,6 +585,42 @@ test("downloadFile (HLS) reporta progreso real usando la duración de ffprobe", 
   assert.ok(progress.some((p) => p.final === true && p.percent === 100));
 });
 
+test("downloadFile (HLS) no imprime 'Archivo listo' cuando hay onProgress (evita residuo en las barras)", async () => {
+  // Regresión: con el MultiBar (onProgress presente) el log 'Archivo listo' se
+  // colaba en medio de las barras y dejaba residuo en la consola (PowerShell).
+  const filePath = path.resolve("./tmp/hls-noecho.mp4");
+  const spawnFn = (command) => {
+    const stream = fakeChild();
+    if (/ffprobe/i.test(command)) {
+      setImmediate(() => {
+        stream.stdout.emit("data", "10\n");
+        stream.emit("close", 0);
+      });
+    } else {
+      setImmediate(() => {
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, "x".repeat(512));
+        stream.emit("close", 0);
+      });
+    }
+    return stream;
+  };
+
+  const logged = [];
+  const originalLog = console.log;
+  console.log = (...a) => logged.push(a.join(" "));
+  try {
+    await downloadFile("https://example.com/video.m3u8", filePath, {
+      spawnFn,
+      onProgress: () => {},
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.ok(!logged.some((l) => /Archivo listo/.test(l)), "no debe imprimir 'Archivo listo' con onProgress");
+});
+
 test("parseM3u8 extrae segmentos en orden y resuelve URLs relativas", () => {
   const body = [
     "#EXTM3U",
@@ -669,7 +710,8 @@ test("downloadSegments rechaza páginas de error del CDN (no son MPEG-TS)", asyn
   );
 });
 
-const { promptSelection, resolveSlugFromSearch } = require("../index.js");
+const { promptSelection, resolveSlugFromSearch, formatMultiSummary } = require("../index.js");
+const { episodeSpecFromArgs, parseEpisodeAnswer, folderForSlug } = require("../src/cli");
 const { PassThrough } = require("node:stream");
 
 // Construye streams input/output falsos para pilotar readline sin un TTY real.
@@ -693,7 +735,7 @@ function fakeIO(keystrokes) {
   return { input, output, getOutput: () => out };
 }
 
-test("promptSelection devuelve el item elegido por índice", async () => {
+test("promptSelection (fallback) devuelve un array con el item elegido por índice", async () => {
   const items = [
     { slug: "one-a", title: "Uno A" },
     { slug: "two-b", title: "Dos B" },
@@ -701,17 +743,17 @@ test("promptSelection devuelve el item elegido por índice", async () => {
   ];
   const { input, output } = fakeIO(["2"]);
   const chosen = await promptSelection(items, { input, output });
-  assert.equal(chosen.slug, "two-b");
+  assert.deepEqual(chosen.map((c) => c.slug), ["two-b"]);
 });
 
-test("promptSelection reintenta ante entrada inválida y luego acepta una válida", async () => {
+test("promptSelection (fallback) reintenta ante entrada inválida y luego acepta una válida", async () => {
   const items = [
     { slug: "one-a", title: "Uno A" },
     { slug: "two-b", title: "Dos B" },
   ];
   const { input, output, getOutput } = fakeIO(["99", "abc", "1"]);
   const chosen = await promptSelection(items, { input, output });
-  assert.equal(chosen.slug, "one-a");
+  assert.deepEqual(chosen.map((c) => c.slug), ["one-a"]);
   assert.match(getOutput(), /no válida/i);
 });
 
@@ -750,16 +792,38 @@ function fakeRawTty(sequences) {
 
 const KEY = { up: "\u001b[A", down: "\u001b[B", enter: "\r", esc: "\u001b" };
 
-test("promptSelection (flechas) baja con ↓ y confirma con Enter", async () => {
+const KEY_SPACE = " ";
+
+test("promptSelection (flechas) sin marcar toma la fila resaltada al pulsar Enter", async () => {
   const items = [
     { slug: "one-a", title: "Uno A" },
     { slug: "two-b", title: "Dos B" },
     { slug: "three-c", title: "Tres C" },
   ];
-  // Empieza en el índice 0; dos ↓ -> índice 2; Enter confirma.
+  // Empieza en el índice 0; dos ↓ -> índice 2; Enter sin marcar -> [ese].
   const { input, output } = fakeRawTty([KEY.down, KEY.down, KEY.enter]);
   const chosen = await promptSelection(items, { input, output });
-  assert.equal(chosen.slug, "three-c");
+  assert.deepEqual(chosen.map((c) => c.slug), ["three-c"]);
+});
+
+test("promptSelection (flechas) marca varios con Espacio y confirma con Enter", async () => {
+  const items = [
+    { slug: "one-a", title: "Uno A" },
+    { slug: "two-b", title: "Dos B" },
+    { slug: "three-c", title: "Tres C" },
+  ];
+  // Marca índice 0, baja al 2, lo marca, Enter -> [0, 2].
+  const { input, output } = fakeRawTty([KEY_SPACE, KEY.down, KEY.down, KEY_SPACE, KEY.enter]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.deepEqual(chosen.map((c) => c.slug), ["one-a", "three-c"]);
+});
+
+test("promptSelection (flechas) desmarca al pulsar Espacio dos veces", async () => {
+  const items = [{ slug: "one-a", title: "Uno A" }, { slug: "two-b", title: "Dos B" }];
+  // Marca 0, lo desmarca, baja al 1, lo marca, Enter -> [1].
+  const { input, output } = fakeRawTty([KEY_SPACE, KEY_SPACE, KEY.down, KEY_SPACE, KEY.enter]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.deepEqual(chosen.map((c) => c.slug), ["two-b"]);
 });
 
 test("promptSelection (flechas) envuelve hacia arriba y cancela con Esc", async () => {
@@ -770,38 +834,133 @@ test("promptSelection (flechas) envuelve hacia arriba y cancela con Esc", async 
 });
 
 test("resolveSlugFromSearch auto-selecciona cuando hay un solo resultado", async () => {
-  const slug = await resolveSlugFromSearch("cualquier", {
+  const animes = await resolveSlugFromSearch("cualquier", {
     searchFn: async () => [{ slug: "solo-uno", title: "Solo Uno" }],
   });
-  assert.equal(slug, "solo-uno");
+  assert.deepEqual(animes, [{ slug: "solo-uno", title: "Solo Uno" }]);
 });
 
 test("resolveSlugFromSearch normaliza la query cuando no hay resultados", async () => {
-  const slug = await resolveSlugFromSearch("Dragon Ball Z", {
+  const animes = await resolveSlugFromSearch("Dragon Ball Z", {
     searchFn: async () => [],
   });
-  assert.equal(slug, "dragon-ball-z");
+  assert.deepEqual(animes, [{ slug: "dragon-ball-z", title: "dragon-ball-z" }]);
 });
 
 test("resolveSlugFromSearch toma la primera coincidencia si no es interactivo", async () => {
-  const slug = await resolveSlugFromSearch("dragon", {
+  const animes = await resolveSlugFromSearch("dragon", {
     searchFn: async () => [
       { slug: "dragon-ball", title: "Dragon Ball" },
       { slug: "dragon-ball-super", title: "Dragon Ball Super" },
     ],
     isInteractive: () => false,
   });
-  assert.equal(slug, "dragon-ball");
+  assert.deepEqual(animes, [{ slug: "dragon-ball", title: "Dragon Ball" }]);
 });
 
-test("resolveSlugFromSearch usa la selección del usuario cuando es interactivo", async () => {
-  const slug = await resolveSlugFromSearch("dragon", {
+test("resolveSlugFromSearch devuelve varios animes (slug+título) cuando el usuario marca varios", async () => {
+  const animes = await resolveSlugFromSearch("dragon", {
     searchFn: async () => [
       { slug: "dragon-ball", title: "Dragon Ball" },
       { slug: "dragon-ball-super", title: "Dragon Ball Super" },
+      { slug: "dragon-ball-z", title: "Dragon Ball Z" },
     ],
     isInteractive: () => true,
-    promptFn: async (results) => results[1],
+    promptFn: async (results) => [results[0], results[2]],
   });
-  assert.equal(slug, "dragon-ball-super");
+  assert.deepEqual(animes, [
+    { slug: "dragon-ball", title: "Dragon Ball" },
+    { slug: "dragon-ball-z", title: "Dragon Ball Z" },
+  ]);
+});
+
+test("resolveSlugFromSearch lanza error si se cancela la selección", async () => {
+  await assert.rejects(
+    () =>
+      resolveSlugFromSearch("dragon", {
+        searchFn: async () => [
+          { slug: "dragon-ball", title: "Dragon Ball" },
+          { slug: "dragon-ball-super", title: "Dragon Ball Super" },
+        ],
+        isInteractive: () => true,
+        promptFn: async () => null,
+      }),
+    /cancelada/i
+  );
+});
+
+test("episodeSpecFromArgs: -e all -> 'all'", () => {
+  assert.equal(episodeSpecFromArgs({ episode: "all" }), "all");
+});
+
+test("episodeSpecFromArgs: rango en -e -> array de episodios", () => {
+  assert.deepEqual(episodeSpecFromArgs({ episode: "3-6" }), [3, 4, 5, 6]);
+});
+
+test("episodeSpecFromArgs: lista en -r -> array de episodios", () => {
+  assert.deepEqual(episodeSpecFromArgs({ range: "1,3,5" }), [1, 3, 5]);
+});
+
+test("episodeSpecFromArgs: -e numérico explícito -> ese número", () => {
+  assert.equal(episodeSpecFromArgs({ episode: "7" }), 7);
+});
+
+test("episodeSpecFromArgs: sin -e explícito (default '1') -> null para preguntar", () => {
+  assert.equal(episodeSpecFromArgs({ episode: "1" }), null);
+});
+
+test("parseEpisodeAnswer interpreta la respuesta como el flag -e", () => {
+  assert.equal(parseEpisodeAnswer("all"), "all");
+  assert.equal(parseEpisodeAnswer(""), "all");
+  assert.deepEqual(parseEpisodeAnswer("2-4"), [2, 3, 4]);
+  assert.deepEqual(parseEpisodeAnswer("1,4"), [1, 4]);
+  // Un solo número llega como lista [5] (parseEpisodeSelection ya normaliza a array).
+  assert.deepEqual(parseEpisodeAnswer("5"), [5]);
+});
+
+test("folderForSlug: sin --folder usa animes/<slug>", () => {
+  const p = folderForSlug("uma-musume", { folder: null, multiple: false });
+  assert.match(p, /animes[/\\]uma-musume$/);
+});
+
+test("folderForSlug: con --folder y un solo anime usa la carpeta tal cual", () => {
+  const p = folderForSlug("uma-musume", { folder: "./descargas", multiple: false });
+  assert.match(p, /descargas$/);
+  assert.doesNotMatch(p, /uma-musume$/);
+});
+
+test("folderForSlug: con --folder y varios animes anida <folder>/<slug>", () => {
+  const p = folderForSlug("uma-musume", { folder: "./descargas", multiple: true });
+  assert.match(p, /descargas[/\\]uma-musume$/);
+});
+
+test("formatMultiSummary consolida por anime con título y totales", () => {
+  // En el runner stdout no es TTY, así que la salida es texto plano (OK/!!).
+  const out = formatMultiSummary(
+    [
+      { title: "Uma Musume: BNW no Chikai", slug: "a", ok: 2, err: 0, total: 2, failures: [] },
+      { title: "Uma Musume: Road to the Top", slug: "b", ok: 1, err: 0, total: 1, failures: [] },
+      {
+        title: "Uma Musume: Shin Jidai no Tobira",
+        slug: "c",
+        ok: 1,
+        err: 1,
+        total: 2,
+        failures: [{ episode: "2", error: "estado 404" }],
+      },
+    ],
+    { rootFolder: "/x/animes" }
+  );
+
+  // Aparece el título de cada anime.
+  assert.match(out, /Uma Musume: BNW no Chikai/);
+  assert.match(out, /Uma Musume: Road to the Top/);
+  assert.match(out, /Uma Musume: Shin Jidai no Tobira/);
+  // El detalle del fallo va bajo su anime.
+  assert.match(out, /ep 2: estado 404/);
+  // Totales consolidados: 3 animes, 4/5 episodios, 1 fallo.
+  assert.match(out, /3 animes/);
+  assert.match(out, /4\/5 episodios/);
+  assert.match(out, /1 fallo\b/);
+  assert.match(out, /Carpeta:.*animes/);
 });

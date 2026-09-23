@@ -1,6 +1,6 @@
 {
     "name": "uwujacker",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "description": "CLI para descargar episodios de anime desde JKAnime con soporte de slugs y descargas paralelas",
     "main": "index.js",
     "bin": {
@@ -13,7 +13,7 @@
         "test": "node --test",
         "release:check": "yarn test",
         "release:tag": "git tag v$(node -p \"require('./package.json').version\")",
-        "build:exe": "npx esbuild index.js --bundle --platform=node --target=node24 --outfile=dist/bundle.js && node --experimental-sea-config sea-config.json && node -e \"const fs=require('node:fs'); const path=require('node:path'); const target = process.platform === 'win32' ? 'uwujacker.exe' : 'uwujacker'; fs.mkdirSync('dist', { recursive: true }); fs.copyFileSync(process.execPath, path.join('dist', target)); const { execSync } = require('node:child_process'); execSync('npx postject@latest ' + JSON.stringify(path.join('dist', target)) + ' NODE_SEA_BLOB dist/sea-prep.blob --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2', { stdio: 'inherit', shell: true });\""
+        "build:exe": "npx esbuild index.js --bundle --platform=node --target=node24 --outfile=dist/bundle.js && node --experimental-sea-config sea-config.json && node -e \"const fs=require('node:fs'); const path=require('node:path'); const target = process.platform === 'win32' ? 'uwujacker.exe' : 'uwujacker'; fs.mkdirSync('dist', { recursive: true }); fs.copyFileSync(process.execPath, path.join('dist', target)); const { execSync } = require('node:child_process'); const fuse = ['NODE_SEA_FUSE', 'fce680ab2cc467b6e072b8b5df1996b2'].join('_'); execSync('npx postject@latest ' + JSON.stringify(path.join('dist', target)) + ' NODE_SEA_BLOB dist/sea-prep.blob --sentinel-fuse ' + fuse, { stdio: 'inherit', shell: true });\""
     },
     "keywords": [
         "anime",
