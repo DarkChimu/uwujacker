@@ -722,6 +722,53 @@ test("promptSelection devuelve null si se cancela con 'q'", async () => {
   assert.equal(chosen, null);
 });
 
+// TTY falso con setRawMode/isTTY para forzar el menú de flechas. Escribimos las
+// secuencias raw de teclado; readline.emitKeypressEvents las convierte en teclas.
+function fakeRawTty(sequences) {
+  const input = new PassThrough();
+  input.isTTY = true;
+  input.isRaw = false;
+  input.setRawMode = (v) => {
+    input.isRaw = v;
+    return input;
+  };
+  const output = new PassThrough();
+  let out = "";
+  output.on("data", (chunk) => {
+    out += chunk.toString();
+  });
+  let i = 0;
+  const feedNext = () => {
+    if (i < sequences.length) {
+      input.write(sequences[i++]);
+      setImmediate(feedNext);
+    }
+  };
+  setImmediate(feedNext);
+  return { input, output, getOutput: () => out };
+}
+
+const KEY = { up: "\u001b[A", down: "\u001b[B", enter: "\r", esc: "\u001b" };
+
+test("promptSelection (flechas) baja con ↓ y confirma con Enter", async () => {
+  const items = [
+    { slug: "one-a", title: "Uno A" },
+    { slug: "two-b", title: "Dos B" },
+    { slug: "three-c", title: "Tres C" },
+  ];
+  // Empieza en el índice 0; dos ↓ -> índice 2; Enter confirma.
+  const { input, output } = fakeRawTty([KEY.down, KEY.down, KEY.enter]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.equal(chosen.slug, "three-c");
+});
+
+test("promptSelection (flechas) envuelve hacia arriba y cancela con Esc", async () => {
+  const items = [{ slug: "one-a", title: "Uno A" }, { slug: "two-b", title: "Dos B" }];
+  const { input, output } = fakeRawTty([KEY.up, KEY.esc]);
+  const chosen = await promptSelection(items, { input, output });
+  assert.equal(chosen, null);
+});
+
 test("resolveSlugFromSearch auto-selecciona cuando hay un solo resultado", async () => {
   const slug = await resolveSlugFromSearch("cualquier", {
     searchFn: async () => [{ slug: "solo-uno", title: "Solo Uno" }],

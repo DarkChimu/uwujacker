@@ -43,10 +43,12 @@ uwujacker --search "Dragon Ball" -e 1
 ```
 
 Cuando hay varias coincidencias (ediciones, temporadas o variantes del nombre),
-uwujacker muestra una lista numerada para que elijas el slug correcto y luego
+uwujacker muestra una lista interactiva para que elijas el anime: navega con las
+flechas ↑/↓, confirma con Enter (o Espacio) y cancela con Esc. Tras elegir, se
 inicia la descarga. Con una única coincidencia se selecciona automáticamente. En
-entornos no interactivos (salida por pipe o CI) se toma la primera coincidencia.
-Esto solo aplica a `--search`; con `-a/--anime` se usa el nombre/slug tal cual.
+entornos no interactivos (salida por pipe o CI) se muestra una lista numerada y,
+si no puede leerse una respuesta, se toma la primera coincidencia. Esto solo
+aplica a `--search`; con `-a/--anime` se usa el nombre/slug tal cual.
 
 ## MP4 directo vs HLS
 
