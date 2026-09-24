@@ -16,56 +16,55 @@ yarn install
 
 ## Uso
 
-Si no pasas `-f`, el programa crea una carpeta automática siguiendo el slug del anime:
+La forma recomendada es buscar por nombre con `--search`: no necesitas conocer el
+slug, escribe el nombre y elige el anime (o varios) de una lista interactiva.
 
 ```bash
+uwujacker --search "uma musume"
+```
+
+Se muestra una lista con todas las coincidencias (ediciones, temporadas y
+variantes del nombre). En el menú:
+
+- Navega con las flechas ↑/↓.
+- Marca/desmarca con **Espacio** (puedes elegir varios animes a la vez).
+- Confirma con **Enter**; cancela con **Esc**.
+
+Después de confirmar, si no indicaste `-e/--episode`, se te pregunta qué
+descargar (número, rango `3-6`, lista `1,3,5` o `all`) y esa selección se aplica a
+todos los animes elegidos. También puedes pasar el episodio de una vez:
+
+```bash
+uwujacker --search "dragon ball" -e 1
+uwujacker --search "dragon ball" -e 1-12
+uwujacker --search "dragon ball" -e all
+```
+
+Cada anime se guarda en `./animes/<slug>/`. Con una sola coincidencia se
+selecciona automáticamente; en entornos no interactivos (pipe/CI) se usa la
+primera coincidencia. Al descargar varios animes se imprime un resumen
+consolidado al final.
+
+### Uso avanzado (slug directo)
+
+Si ya conoces el slug puedes ir directo con `-a/--anime`, sin búsqueda ni menú.
+Si no pasas `-f`, se crea `./animes/<slug>/` automáticamente.
+
+```bash
+# Un episodio (carpeta automática ./animes/dr-stone/)
 uwujacker -a dr-stone -e 1
-```
 
-Esto descargará en:
-
-```bash
-./animes/dr-stone/
-```
-
-Descargar un episodio concreto con carpeta manual:
-
-```bash
+# Carpeta manual
 uwujacker -a dr-stone -e 1 -f ./animes/drstone
-```
 
-Descargar un rango de episodios:
-
-```bash
+# Rango o lista
 uwujacker -a dr-stone -e 3-6
-uwujacker -a dr-stone --range 3-6
 uwujacker -a dr-stone --range 1,3,5
-```
 
-Descargar todos los episodios disponibles:
-
-```bash
+# Todos los episodios
 uwujacker -a dr-stone -e all
-```
 
-Buscar por nombre y elegir el slug de una lista de coincidencias antes de descargar:
-
-```bash
-uwujacker --search "Dragon Ball" -e 1
-```
-
-Si la búsqueda devuelve varias coincidencias (ediciones, temporadas o variantes
-del nombre), se muestra una lista interactiva de selección múltiple: navega con
-las flechas ↑/↓, marca/desmarca con Espacio y confirma con Enter; cancela con
-Esc. Puedes elegir varios animes a la vez. Si no indicas `-e/--episode`, tras
-confirmar se te pregunta qué descargar (número, rango `3-6`, lista `1,3,5` o
-`all`) y esa selección se aplica a todos los animes elegidos. Con una sola
-coincidencia se selecciona automáticamente. En entornos no interactivos (salida
-por pipe o CI) se usa la primera coincidencia.
-
-Ejecutar directamente con Yarn:
-
-```bash
+# Directamente con Yarn
 yarn download -- --anime dr-stone --episode 3-6
 ```
 
@@ -76,7 +75,7 @@ yarn download -- --anime dr-stone --episode 3-6
 - `-r, --range`: rango o lista específica, por ejemplo `3-6` o `1,3,5`
 - `-f, --folder`: carpeta de destino. Si no se indica, se usa `./animes/<slug>`
 - `-c, --concurrency`: número máximo de descargas paralelas cuando se usa `all` o un rango (por defecto: 5)
-- `--search`: busca el slug correcto antes de descargar
+- `--search`: busca por nombre y elige el anime (o varios) de una lista (flujo recomendado)
 - `--skip-existing`: omite archivos ya descargados (activo por defecto)
 - `--overwrite`: fuerza re-descarga
 - `-v, --verbose`: muestra más logs

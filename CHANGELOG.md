@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1] - 2026-09-23
+
+### Fixed
+- `--search` ahora devuelve todas las coincidencias en lugar de solo ~5. Se usaba el endpoint de autocompletado (`ajax_search`), que limita los resultados y exigía token CSRF + cookie de sesión (lo que provocaba errores 419). Ahora la búsqueda usa la página de resultados completos (`/buscar/<query>/`), un `GET` simple sin token que devuelve todas las ediciones, temporadas y variantes (p. ej. "uma musume" pasa de 5 a 8 resultados, incluyendo `-tv`, `-season-2` y `-season-3`).
+
+### Docs
+- README y guía de uso reorganizados: el flujo con `--search` pasa a ser el recomendado y aparece primero; la descarga directa con `-a/--anime` (slug) se agrupa como "uso avanzado".
+
 ## [1.3.0] - 2026-09-23
 
 ### Added

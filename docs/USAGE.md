@@ -1,6 +1,53 @@
 # Uso de uwujacker
 
-## Descarga rápida
+La forma recomendada de usar uwujacker es buscar por nombre con `--search` y
+elegir el anime (o varios) de una lista interactiva. No necesitas conocer el
+slug exacto: escribe el nombre y el programa te muestra las coincidencias.
+
+## Búsqueda por nombre (recomendado)
+
+```bash
+uwujacker --search "uma musume"
+```
+
+Se muestra una lista interactiva (con el nombre y versión del proyecto en la
+cabecera) con todas las coincidencias: ediciones, temporadas y variantes del
+nombre. En el menú:
+
+- Navega con las flechas ↑/↓.
+- Marca/desmarca con **Espacio** (puedes elegir varios animes a la vez).
+- Confirma con **Enter**; cancela con **Esc**.
+- Al salir del menú, la lista se limpia de la consola.
+
+Después de confirmar, si no indicaste `-e/--episode`, se te pregunta qué
+descargar. La respuesta acepta lo mismo que `-e`: un número, un rango `3-6`, una
+lista `1,3,5` o `all`. Esa selección se aplica a todos los animes marcados.
+
+También puedes pasar el episodio de una vez con `-e`:
+
+```bash
+uwujacker --search "dragon ball" -e 1
+uwujacker --search "dragon ball" -e 1-12
+uwujacker --search "dragon ball" -e all
+```
+
+Cada anime se guarda en `./animes/<slug>/`. Si pasas `-f/--folder`, las descargas
+se anidan en `<folder>/<slug>/` para no mezclarse.
+
+Cuando descargas varios animes a la vez, al final se imprime un único resumen
+consolidado: una línea por anime con su título y un `✓`/`✗` según el resultado,
+el detalle de los episodios fallidos bajo cada anime, y una línea de totales
+(animes, episodios completados y fallos).
+
+Con una única coincidencia se selecciona automáticamente. En entornos no
+interactivos (salida por pipe o CI) se toma la primera coincidencia.
+
+## Uso avanzado
+
+Si ya conoces el slug del anime puedes ir directo con `-a/--anime`, sin pasar por
+la búsqueda ni el menú.
+
+### Descarga rápida
 
 ```bash
 uwujacker -a dr-stone -e 1
@@ -12,7 +59,7 @@ Por defecto, si no indicas `-f`, el programa crea la carpeta:
 ./animes/dr-stone/
 ```
 
-## Descarga por rango
+### Descarga por rango
 
 ```bash
 uwujacker -a dr-stone -e 3-6
@@ -22,50 +69,19 @@ uwujacker -a dr-stone --range 1,3,5
 
 Todos los episodios del rango se muestran en paralelo usando el mismo estilo visual que `-e all`.
 
-## Descarga completa
+### Descarga completa
 
 ```bash
 uwujacker -a dr-stone -e all
 ```
 
-## Carpeta personalizada
+### Carpeta personalizada
 
 ```bash
 uwujacker -a dr-stone -e 1 -f ./mis-descargas
 ```
 
 La ruta indicada se usará tal cual.
-
-## Búsqueda por nombre
-
-```bash
-uwujacker --search "Dragon Ball" -e 1
-```
-
-Cuando hay varias coincidencias (ediciones, temporadas o variantes del nombre),
-uwujacker muestra una lista interactiva (con el nombre y versión del proyecto en
-la cabecera) para que elijas uno o varios animes: navega con las flechas ↑/↓,
-marca/desmarca con Espacio y confirma la selección con Enter; cancela con Esc. Al
-salir del menú la lista se limpia de la consola.
-
-Si no indicas `-e/--episode` (ni `-r/--range`), tras confirmar la selección se te
-pregunta qué descargar; la respuesta acepta lo mismo que `-e`: un número, un
-rango `3-6`, una lista `1,3,5` o `all`. Esa selección se aplica a todos los
-animes marcados.
-
-Con una única coincidencia se selecciona automáticamente. En entornos no
-interactivos (salida por pipe o CI) se muestra una lista numerada de selección
-única y, si no puede leerse una respuesta, se toma la primera coincidencia. Esto
-solo aplica a `--search`; con `-a/--anime` se usa el nombre/slug tal cual.
-
-Al elegir varios animes, cada uno se guarda en `./animes/<slug>/`. Si pasas
-`-f/--folder`, los descargas se anidan en `<folder>/<slug>/` para no mezclarse.
-
-Cuando descargas varios animes a la vez, al final se imprime un único resumen
-consolidado: una línea por anime con su título y un `✓`/`✗` según el resultado,
-el detalle de los episodios fallidos bajo cada anime, y una línea de totales
-(animes, episodios completados y fallos). Con un solo anime se mantiene el
-resumen individual de siempre.
 
 ## MP4 directo vs HLS
 
