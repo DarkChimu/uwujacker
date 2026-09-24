@@ -25,8 +25,26 @@ const {
   resolveAnimeSlug,
 } = require("../index.js");
 const { formatProgressBar, downloadFile, parseM3u8, downloadSegments } = require("../src/services/downloader");
-const { resolveEpisodePlan } = require("../src/services/jkanime");
+const { resolveEpisodePlan, extractSearchResultsFromHtml } = require("../src/services/jkanime");
 const { buildEpisodeFileName } = require("../src/utils/files");
+
+// Construye el HTML de la página /buscar/ tal como la sirve JKAnime: una
+// tarjeta `.anime__item` por resultado con el título/slug en `<h5><a href>`.
+function buscarHtml(items) {
+  const cards = items
+    .map(
+      ({ slug, title }) => `
+        <div class="anime__item">
+          <a href="https://jkanime.net/${slug}/"><div class="anime__item__pic"></div></a>
+          <div class="anime__item__text">
+            <ul><li>Concluido</li><li class="anime">Serie</li></ul>
+            <h5><a href="https://jkanime.net/${slug}/">${title}</a></h5>
+          </div>
+        </div>`
+    )
+    .join("\n");
+  return `<html><body><div class="row">${cards}</div></body></html>`;
+}
 
 test("parseArgs lee anime, episodio y carpeta", () => {
   const parsed = parseArgs(["--anime", "dr-stone", "--episode", "5", "--folder", "./animes/drstone"]);
@@ -327,62 +345,52 @@ test("downloadEpisodesInParallel no aborta el lote si un episodio falla", async 
 
 test("searchAnimeByQuery realiza una búsqueda AJAX y obtiene resultados", async () => {
   const requestFn = async (url) => {
-    if (url.includes("ajax_search")) {
-      return {
-        body: JSON.stringify({
-          data: [
-            { id: "1", attributes: { slug: "dr-stone", title: "Dr. Stone" } },
-            { id: "2", attributes: { slug: "one-piece", title: "One Piece" } },
-          ],
-        }),
-      };
+    if (url.includes("/buscar/")) {
+      return { body: buscarHtml([
+        { slug: "dr-stone", title: "Dr. Stone" },
+        { slug: "one-piece", title: "One Piece" },
+      ]) };
     }
-
     throw new Error(`URL inesperada: ${url}`);
   };
 
-  const results = await searchAnimeByQuery("dr stone", {
-    requestFn,
-  });
+  const results = await searchAnimeByQuery("dr stone", { requestFn });
 
   assert.equal(results.length, 2);
-  assert.equal(results[0].id, "1");
+  assert.equal(results[0].slug, "dr-stone");
   assert.equal(results[0].title, "Dr. Stone");
 });
 
-test("searchAnimeByQuery lee el token del meta y reenvía la cookie de sesión", async () => {
-  // Regresión: JKAnime devolvía 419 porque leíamos el token de un <input> que ya
-  // no existe y no reenviábamos la cookie de sesión. Ahora el token viene del
-  // <meta name="csrf-token"> y la cookie del home debe llegar al ajax_search.
-  let sentHeaders = null;
-  const homeRequestFn = async () => ({
-    body: '<meta name="csrf-token" content="tok-42">',
-    cookies: ["XSRF-TOKEN=abc; Path=/; HttpOnly", "jkanime_session=xyz; Path=/"],
-  });
-  const requestFn = async (url, opts = {}) => {
-    if (url.includes("ajax_search")) {
-      sentHeaders = opts.headers;
-      return { body: JSON.stringify([{ slug: "uma-musume-cinderella-gray", title: "Uma Musume: Cinderella Gray" }]) };
-    }
-    throw new Error(`URL inesperada: ${url}`);
+test("searchAnimeByQuery consulta /buscar/ (no el autocompletado) y devuelve todos los resultados", async () => {
+  // Regresión: el autocompletado (ajax_search) capaba a ~5 resultados. Ahora se
+  // usa /buscar/<query>/ que devuelve todas las coincidencias (aquí 8, como en la
+  // web real para "uma musume").
+  let requestedUrl = null;
+  const requestFn = async (url) => {
+    requestedUrl = url;
+    return { body: buscarHtml([
+      { slug: "uma-musume-cinderella-gray", title: "Uma Musume: Cinderella Gray" },
+      { slug: "uma-musume-cinderella-gray-part-2", title: "Uma Musume: Cinderella Gray Part 2" },
+      { slug: "uma-musume-pretty-derby-bnw-no-chikai", title: "Uma Musume: Pretty Derby - BNW no Chikai" },
+      { slug: "uma-musume-pretty-derby-road-to-the-top", title: "Uma Musume: Pretty Derby - Road to the Top" },
+      { slug: "uma-musume-pretty-derby-shin-jidai-no-tobira", title: "Uma Musume: Pretty Derby - Shin Jidai no Tobira" },
+      { slug: "uma-musume-pretty-derby-tv", title: "Uma Musume: Pretty Derby (TV)" },
+      { slug: "uma-musume-pretty-derby-season-2", title: "Uma Musume: Pretty Derby Season 2" },
+      { slug: "uma-musume-pretty-derby-season-3", title: "Uma Musume: Pretty Derby Season 3" },
+    ]) };
   };
 
-  const results = await searchAnimeByQuery("uma musume", { homeRequestFn, requestFn });
+  const results = await searchAnimeByQuery("uma musume", { requestFn });
 
-  assert.equal(results.length, 1);
+  assert.match(requestedUrl, /\/buscar\/uma(%20|\+)?musume/i);
+  assert.equal(results.length, 8);
   assert.equal(results[0].slug, "uma-musume-cinderella-gray");
-  assert.equal(sentHeaders["X-CSRF-TOKEN"], "tok-42");
-  assert.equal(sentHeaders.Cookie, "XSRF-TOKEN=abc; jkanime_session=xyz");
+  assert.ok(results.some((r) => r.slug === "uma-musume-pretty-derby-season-3"));
 });
 
-test("searchAnimeByQuery devuelve resultados de la AJAX search", async () => {
+test("searchAnimeByQuery devuelve slug y título de cada tarjeta", async () => {
   const results = await searchAnimeByQuery("Dragon", {
-    homeRequestFn: async () => ({ body: '<input name="_token" value="abc123">' }),
-    requestFn: async () => ({
-      body: JSON.stringify([
-        { slug: "dragon-ball", title: "Dragon Ball", type: "Serie", status: "Concluido" },
-      ]),
-    }),
+    requestFn: async () => ({ body: buscarHtml([{ slug: "dragon-ball", title: "Dragon Ball" }]) }),
   });
 
   assert.equal(results[0].slug, "dragon-ball");
@@ -391,15 +399,28 @@ test("searchAnimeByQuery devuelve resultados de la AJAX search", async () => {
 
 test("resolveAnimeSlug convierte un nombre legible en el slug correcto", async () => {
   const slug = await resolveAnimeSlug("Dragon Ball", {
-    homeRequestFn: async () => ({ body: '<input name="_token" value="abc123">' }),
-    requestFn: async () => ({
-      body: JSON.stringify([
-        { slug: "dragon-ball", title: "Dragon Ball", type: "Serie", status: "Concluido" },
-      ]),
-    }),
+    requestFn: async () => ({ body: buscarHtml([{ slug: "dragon-ball", title: "Dragon Ball" }]) }),
   });
 
   assert.equal(slug, "dragon-ball");
+});
+
+test("extractSearchResultsFromHtml parsea .anime__item, deduplica y limpia el título", () => {
+  // La tarjeta trae dos anchors al mismo slug (imagen + título); no debe duplicar.
+  const html = buscarHtml([
+    { slug: "uma-musume-cinderella-gray", title: "  Uma Musume:   Cinderella Gray  " },
+    { slug: "uma-musume-pretty-derby-tv", title: "Uma Musume: Pretty Derby (TV)" },
+  ]);
+  const results = extractSearchResultsFromHtml(html);
+  assert.equal(results.length, 2);
+  assert.equal(results[0].slug, "uma-musume-cinderella-gray");
+  assert.equal(results[0].title, "Uma Musume: Cinderella Gray"); // espacios colapsados
+  assert.equal(results[1].slug, "uma-musume-pretty-derby-tv");
+});
+
+test("extractSearchResultsFromHtml devuelve [] para HTML sin resultados", () => {
+  assert.deepEqual(extractSearchResultsFromHtml("<html><body>nada</body></html>"), []);
+  assert.deepEqual(extractSearchResultsFromHtml(""), []);
 });
 
 test("resolveEpisodePlan detecta el último episodio real por existencia (13, no 50+)", async () => {

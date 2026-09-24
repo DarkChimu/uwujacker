@@ -214,87 +214,53 @@ function pickBestMediaUrl(candidates) {
   return direct || hls || other || null;
 }
 
+// Parses the full-results search page (/buscar/<query>/). Each result is a
+// `.anime__item` whose title+slug live in the `<h5><a href=".../<slug>/">`.
+// This page returns all matches (up to ~30) instead of the ~5 the ajax_search
+// autocomplete endpoint caps at. Returns [{ id, slug, title, raw }].
+function extractSearchResultsFromHtml(html) {
+  if (!html || typeof html !== "string") return [];
+
+  const $ = cheerio.load(html);
+  const results = [];
+  const seen = new Set();
+
+  $(".anime__item").each((_, el) => {
+    const $el = $(el);
+    // Prefer the title anchor; fall back to the image anchor for the href.
+    const titleLink = $el.find("h5 a[href]").first();
+    const href = titleLink.attr("href") || $el.find("a[href]").first().attr("href") || "";
+    const match = href.match(/jkanime\.net\/([a-z0-9-]+)\/?/i) || href.match(/\/([a-z0-9-]+)\/?$/i);
+    const slug = normalizeSlug(match ? match[1] : "");
+    if (!slug || seen.has(slug)) return;
+    seen.add(slug);
+
+    const title = titleLink.text().trim().replace(/\s+/g, " ") || slug;
+    results.push({ id: null, slug, title, raw: { slug, title, href } });
+  });
+
+  return results;
+}
+
 async function searchAnimeByQuery(query, options = {}) {
-  const {
-    baseUrl = DEFAULT_BASE_URL,
-    requestFn = makeRequest,
-    homeRequestFn = null,
-  } = options;
+  const { baseUrl = DEFAULT_BASE_URL, requestFn = makeRequest } = options;
 
   const safeQuery = (query || "").trim();
   if (!safeQuery) {
     return [];
   }
 
-  // Obtain the CSRF token from the home page; JKAnime requires it on ajax_search.
-  // If the home page cannot be fetched we still attempt the search with an empty
-  // token rather than aborting: the AJAX endpoint is the source of truth.
-  const homeFn = homeRequestFn || (() => requestFn(`${baseUrl}/`));
-  let homePage;
-  try {
-    homePage = await homeFn();
-  } catch (error) {
-    homePage = { body: "" };
-  }
-
-  const homeBody = homePage?.body || "";
-  // JKAnime moved the CSRF token into a <meta name="csrf-token"> tag; the old
-  // form-input variants are kept as fallbacks in case the markup shifts again.
-  const tokenMatch = homeBody.match(/name=["']csrf-token["']\s+content=["']([^"']+)["']/i) ||
-    homeBody.match(/name=["']_token["']\s+value=["']([^"']+)["']/i) ||
-    homeBody.match(/_token[^\n]*value=["']([^"']+)["']/i);
-  const csrfToken = tokenMatch ? tokenMatch[1] : "";
-
-  // Laravel validates the token against the session cookie, so we must send the
-  // cookies from the home page back on the POST or the endpoint returns 419.
-  const cookieHeader = (homePage?.cookies || [])
-    .map((cookie) => String(cookie).split(";")[0])
-    .filter(Boolean)
-    .join("; ");
-
-  const payload = new URLSearchParams({ _token: csrfToken, q: safeQuery });
-
-  const searchResponse = await requestFn(`${baseUrl}/ajax_search`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-      "X-Requested-With": "XMLHttpRequest",
-      "X-CSRF-TOKEN": csrfToken,
-      Accept: "application/json, text/plain, */*",
-      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
-    },
-    body: payload.toString(),
+  // Use the full-results search page rather than the ajax_search autocomplete:
+  // the autocomplete caps at ~5 hits (and needed a CSRF token + session cookie,
+  // which broke with a 419). /buscar/<query>/ is a plain GET that returns every
+  // match, and does not paginate (a fixed cap per query), so one request is all
+  // we need. ponytail: no pagination logic because the site itself doesn't page.
+  const url = `${baseUrl}/buscar/${encodeURIComponent(safeQuery)}/`;
+  const response = await requestFn(url, {
     validateStatus: (status) => status >= 200 && status < 500,
   });
 
-  const responseData = parseJsonSafe(searchResponse?.body) ?? [];
-  const list = Array.isArray(responseData)
-    ? responseData
-    : Array.isArray(responseData.data)
-      ? responseData.data
-      : [];
-
-  return list
-    .map((item) => {
-      if (item && typeof item === "object") {
-        const slug = item.slug || item.attributes?.slug || item.url?.replace(/^\//, "").split("/")[0] || "";
-        const title = item.title || item.name || item.attributes?.title || item.attributes?.name || "";
-        if (!slug) return null;
-        return {
-          id: item.id ?? item.attributes?.id ?? null,
-          slug: normalizeSlug(slug),
-          title: title || slug,
-          raw: item,
-        };
-      }
-
-      if (typeof item === "string") {
-        return { id: null, slug: normalizeSlug(item), title: item, raw: item };
-      }
-
-      return null;
-    })
-    .filter(Boolean);
+  return extractSearchResultsFromHtml(response?.body || "");
 }
 
 async function resolveAnimeSlug(query, options = {}) {
@@ -402,6 +368,7 @@ module.exports = {
   extractEpisodeIdFromHtml,
   extractLastChapterFromJson,
   extractLastChapterFromHtml,
+  extractSearchResultsFromHtml,
   searchAnimeByQuery,
   resolveAnimeSlug,
   resolveEpisodePlan,
