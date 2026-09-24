@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.2] - 2026-09-23
+
+### Fixed
+- En descargas de varios animes, las barras de progreso mostraban solo "Ep NN" sin indicar a qué anime pertenecían, lo que resultaba confuso al pasar de un anime al siguiente. Ahora, al descargar varios animes, el nombre del anime se muestra una sola vez como encabezado sobre su bloque de barras (las descargas son secuenciales por anime, así que no se repite en cada barra). Al terminar cada anime, ese mismo encabezado se reescribe en su sitio con un `✓` (o `✗` si algún episodio falló), quedando una única línea por anime, sin duplicados ni residuos. En descargas de un solo anime no cambia nada.
+- El resumen consolidado (varios animes) ya no aparece duplicado: antes de imprimirlo se limpian las líneas `✓/✗ <anime>` de progreso, de modo que la información de cada anime se ve una sola vez (en el resumen).
+
 ## [1.3.1] - 2026-09-23
 
 ### Fixed

@@ -6,6 +6,7 @@ const { pipeline } = require("node:stream/promises");
 const cliProgress = require("cli-progress");
 const { ensureDirectoryExists, formatBytes, validateDownloadedFile, buildEpisodeFileName } = require("../utils/files");
 const { makeRequest, extractPlayerUrlFromEpisodeHtml, extractMediaUrlFromPlayerHtml } = require("./jkanime");
+const { colorize } = require("../utils/console");
 const { spawn } = require("child_process");
 
 function isInteractive() {
@@ -579,6 +580,11 @@ async function downloadEpisodesInParallel({
   // can print one consolidated summary instead. The structured result is
   // always returned regardless.
   printSummary = true,
+  // Optional anime name printed once as a header above this anime's block of
+  // bars (e.g. "Uma Musume (TV):"). Used when downloading several animes so it's
+  // clear which anime the "Ep NN" bars belong to, without repeating the name on
+  // every bar (downloads are sequential per anime). Omitted -> no header.
+  label = "",
 }) {
   const queue = [...episodes];
   const results = [];
@@ -617,6 +623,16 @@ async function downloadEpisodesInParallel({
       )
     : null;
   const bars = new Map();
+
+  // Show the anime name once as a header above its block of bars, instead of
+  // repeating it on every "Ep NN" bar (downloads are sequential per anime). It's
+  // a plain console line printed just above the bars. When the anime finishes we
+  // rewrite that same line in place with "✓ <anime>" (see below), so there's one
+  // line per anime that starts plain and ends with a check — no duplicate.
+  const hasHeader = Boolean(label) && pendingEpisodes.length > 0;
+  if (hasHeader) {
+    console.log(`${label}:`);
+  }
 
   const worker = async () => {
     while (nextIndex < pendingEpisodes.length) {
@@ -692,6 +708,21 @@ async function downloadEpisodesInParallel({
   await Promise.all(workers);
 
   if (multibar) multibar.stop();
+
+  // Mark the anime as done: ✓ if all ok, ✗ if any failed. On a TTY, after
+  // stop()'s clearBottom the cursor sits at the start of the (now cleared) bar
+  // block — i.e. the line right below the header — so we move up one line and
+  // overwrite the header in place, turning "<anime>:" into "✓ <anime>" with no
+  // duplicate. Without a TTY there are no bars, so we just print the line.
+  if (hasHeader) {
+    const mark = errorCount > 0 ? colorize("✗", "31") : colorize("✓", "32");
+    if (multibar && isInteractive()) {
+      // \u001b[1A up one line, \u001b[1G col 1, \u001b[2K clear line.
+      process.stdout.write(`\u001b[1A\u001b[1G\u001b[2K${mark} ${label}\n`);
+    } else {
+      console.log(`${mark} ${label}`);
+    }
+  }
 
   if (printSummary) {
     const summaryLines = [

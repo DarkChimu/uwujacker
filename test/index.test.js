@@ -317,6 +317,75 @@ test("downloadEpisodesInParallel respeta el límite de concurrencia", async () =
   assert.equal(maxActive, 2);
 });
 
+test("downloadEpisodesInParallel imprime el encabezado una vez y una línea de completado con check", async () => {
+  const logged = [];
+  const originalLog = console.log;
+  console.log = (...a) => logged.push(a.join(" "));
+  try {
+    await downloadEpisodesInParallel({
+      anime: "uma-musume-pretty-derby-tv",
+      label: "Uma Musume: Pretty Derby (TV)",
+      episodes: ["1", "2", "3"],
+      folder: "./tmp",
+      concurrency: 3,
+      printSummary: false,
+      downloadEpisodeFn: async ({ episode }) => `uma-${episode}.mp4`,
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  // Encabezado "en curso" exactamente una vez (no uno por episodio).
+  const headerHits = logged.filter((l) => l.includes("Uma Musume: Pretty Derby (TV):"));
+  assert.equal(headerHits.length, 1);
+  // Línea de completado con check (✓) al terminar (sin ANSI en el runner).
+  const doneHits = logged.filter((l) => /✓ Uma Musume: Pretty Derby \(TV\)$/.test(l));
+  assert.equal(doneHits.length, 1);
+});
+
+test("downloadEpisodesInParallel marca el anime con ✗ si algún episodio falla", async () => {
+  const logged = [];
+  const originalLog = console.log;
+  console.log = (...a) => logged.push(a.join(" "));
+  try {
+    await downloadEpisodesInParallel({
+      anime: "uma-musume-pretty-derby-tv",
+      label: "Uma Musume (TV)",
+      episodes: ["1", "2"],
+      folder: "./tmp",
+      concurrency: 1,
+      printSummary: false,
+      downloadEpisodeFn: async ({ episode }) => {
+        if (episode === "2") throw new Error("404");
+        return `uma-${episode}.mp4`;
+      },
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.ok(logged.some((l) => /✗ Uma Musume \(TV\)$/.test(l)), "debe marcar con ✗ cuando hay fallos");
+});
+
+test("downloadEpisodesInParallel no imprime encabezado si no se pasa label", async () => {
+  const logged = [];
+  const originalLog = console.log;
+  console.log = (...a) => logged.push(a.join(" "));
+  try {
+    await downloadEpisodesInParallel({
+      anime: "dr-stone",
+      episodes: ["1", "2"],
+      folder: "./tmp",
+      printSummary: false,
+      downloadEpisodeFn: async ({ episode }) => `dr-${episode}.mp4`,
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.ok(!logged.some((l) => /dr-stone:/.test(l)), "sin label no debe imprimir encabezado");
+});
+
 test("downloadEpisodesInParallel no aborta el lote si un episodio falla", async () => {
   const attempted = [];
 
@@ -984,4 +1053,26 @@ test("formatMultiSummary consolida por anime con título y totales", () => {
   assert.match(out, /4\/5 episodios/);
   assert.match(out, /1 fallo\b/);
   assert.match(out, /Carpeta:.*animes/);
+});
+
+const { clearLines } = require("../src/utils/console");
+
+test("clearLines emite el ANSI para borrar n líneas en un TTY", () => {
+  let written = "";
+  const output = { isTTY: true, write: (s) => { written += s; } };
+  clearLines(3, { output });
+  // Sube 3 líneas y limpia hacia abajo.
+  assert.equal(written, "\u001b[3A\u001b[0J");
+});
+
+test("clearLines no hace nada sin TTY ni con n<=0", () => {
+  let written = "";
+  const noTty = { isTTY: false, write: (s) => { written += s; } };
+  clearLines(3, { output: noTty });
+  assert.equal(written, "");
+
+  const tty = { isTTY: true, write: (s) => { written += s; } };
+  clearLines(0, { output: tty });
+  clearLines(-2, { output: tty });
+  assert.equal(written, "");
 });

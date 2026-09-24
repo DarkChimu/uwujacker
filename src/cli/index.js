@@ -4,7 +4,7 @@ const path = require("path");
 const { downloadEpisode, downloadEpisodesInParallel } = require("../services/downloader");
 const { resolveAnimeSlug, resolveEpisodePlan, searchAnimeByQuery, normalizeSlug } = require("../services/jkanime");
 const { ensureDirectoryExists } = require("../utils/files");
-const { promptSelection, promptText, formatMultiSummary } = require("../utils/console");
+const { promptSelection, promptText, formatMultiSummary, clearLines } = require("../utils/console");
 const { parseArgv } = require("./args");
 
 // Resolves the anime(s) for the --search flag by letting the user pick from the
@@ -94,7 +94,7 @@ function folderForSlug(slug, { folder, multiple }) {
 // `episodesSpec` is "all", an array of episode numbers, or a single number.
 // `printSummary` is forwarded to the batch downloader: for multi-anime we
 // suppress the per-anime summary and print one consolidated summary instead.
-async function downloadAnime({ slug, title, episodesSpec, args, targetFolder, printSummary }) {
+async function downloadAnime({ slug, title, episodesSpec, args, targetFolder, printSummary, label = "" }) {
   ensureDirectoryExists(targetFolder);
   const common = {
     anime: slug,
@@ -113,6 +113,7 @@ async function downloadAnime({ slug, title, episodesSpec, args, targetFolder, pr
       episodes,
       concurrency: Math.max(1, Number(args.concurrency) || 5),
       printSummary,
+      label,
     });
     return { title, slug, folder: targetFolder, ok: res.ok, err: res.err, total: res.total, failures: res.failures };
   }
@@ -207,11 +208,19 @@ async function cli(argv = process.argv) {
       args,
       targetFolder,
       printSummary: !multiple,
+      // Only when downloading several animes: print the anime name once as a
+      // header above its block of bars, so it's clear which anime the "Ep NN"
+      // bars belong to. Prefer the title; fall back to the slug (e.g. -a path).
+      label: multiple ? (title || slug) : "",
     });
     outcomes.push(outcome);
   }
 
   if (multiple) {
+    // Each downloaded anime left a "✓/✗ <anime>" line on screen; the summary
+    // below repeats that info, so clear those lines first (TTY only) to avoid
+    // showing everything twice.
+    clearLines(outcomes.length);
     const rootFolder = args.folder ? path.resolve(args.folder) : path.resolve("animes");
     console.log(formatMultiSummary(outcomes, { rootFolder }));
   }

@@ -22,6 +22,17 @@ function colorize(text, ansiCode) {
   return `\u001b[${ansiCode}m${text}\u001b[0m`;
 }
 
+// Removes the last `n` printed lines from the terminal (moves the cursor up n
+// lines and clears from there down). No-op when there's no TTY, since a piped or
+// redirected output can't reposition the cursor. Used to drop the per-anime
+// "✓ <anime>" lines just before printing the consolidated summary, which would
+// otherwise repeat the same information.
+function clearLines(n, { output = process.stdout } = {}) {
+  if (!Number.isInteger(n) || n <= 0) return;
+  if (!output || !output.isTTY) return;
+  output.write(`\u001b[${n}A\u001b[0J`);
+}
+
 // Reads name+version from package.json for the menu banner. Wrapped in try/catch
 // because a bundled SEA binary may not resolve the relative JSON require.
 // ponytail: static fallback if the manifest can't be read (SEA build).
@@ -247,4 +258,5 @@ module.exports = {
   promptSelection,
   promptText,
   formatMultiSummary,
+  clearLines,
 };
